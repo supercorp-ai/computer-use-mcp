@@ -10,7 +10,7 @@ import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import express, { type Application, type Request, type Response as ExpressResponse } from 'express'
+import express, { type Application, type NextFunction, type Request, type Response as ExpressResponse } from 'express'
 import puppeteer, { executablePath, type Browser, type KeyInput, type MouseButton, type Page } from 'puppeteer'
 import { hideBin } from 'yargs/helpers'
 import yargs from 'yargs'
@@ -33,12 +33,8 @@ interface Config {
   environment: 'browser'
   headless: boolean
   defaultUrl?: string
-  sessionMode: 'single' | 'header'
-  sessionHeader?: string
   toolsPrefix: string
   publicBaseUrl?: string
-  screenshotPath: string
-  screenshotTtlMs: number
   streamPath: string
   streamDefaults: { fps: number; quality: number }
   enablePreview: boolean
@@ -48,11 +44,6 @@ interface Config {
   displayBase: number
   pointerTool?: string
   blankPageUrl: string
-}
-
-interface ScreenshotReference {
-  id: string
-  url: string
 }
 
 interface ActionResult {
@@ -69,7 +60,6 @@ type HlsRecorder = {
 interface ServerContext {
   config: Config
   sessionManager: ComputerSessionManager
-  screenshotStore: ScreenshotStore
   streamManager: StreamManager
 }
 
@@ -326,55 +316,6 @@ function humanActionSummary(action: z.infer<typeof actionSchema>): string {
 // -----------------------------------------------------------------------------
 // Screenshot storage (in-memory with TTL) so we can serve via HTTP
 // -----------------------------------------------------------------------------
-class ScreenshotStore {
-  #shots = new Map<string, { buffer: Buffer; contentType: string; createdAt: number }>()
-  #ttlMs: number
-  #baseUrlFactory: () => string
-  #path: string
-  #interval: NodeJS.Timeout
-
-  constructor(options: { ttlMs: number; baseUrlFactory: () => string; path: string }) {
-    this.#ttlMs = options.ttlMs
-    this.#baseUrlFactory = options.baseUrlFactory
-    this.#path = options.path
-    this.#interval = setInterval(() => this.pruneExpired(), Math.min(this.#ttlMs, 60_000))
-  }
-
-  attachRoutes(app: Application) {
-    app.get(`${this.#path}/:id`, (req: Request, res: ExpressResponse) => {
-      const shot = this.#shots.get(req.params.id)
-      if (!shot) {
-        res.status(404).send('Not found')
-        return
-      }
-      res.setHeader('Cache-Control', 'no-store')
-      res.type(shot.contentType)
-      res.send(shot.buffer)
-    })
-  }
-
-  store(buffer: Buffer, contentType: string): ScreenshotReference {
-    const id = randomUUID()
-    this.#shots.set(id, { buffer, contentType, createdAt: Date.now() })
-    return { id, url: `${this.#baseUrlFactory()}${this.#path}/${id}` }
-  }
-
-  stop() {
-    clearInterval(this.#interval)
-    this.#shots.clear()
-  }
-
-  private pruneExpired() {
-    if (this.#ttlMs <= 0) return
-    const threshold = Date.now() - this.#ttlMs
-    for (const [id, info] of this.#shots.entries()) {
-      if (info.createdAt < threshold) {
-        this.#shots.delete(id)
-      }
-    }
-  }
-}
-
 // -----------------------------------------------------------------------------
 // Computer session management (Puppeteer-backed virtual browser)
 // -----------------------------------------------------------------------------
@@ -738,6 +679,21 @@ class ComputerSessionManager {
     return session
   }
 
+  peek(memoryKey: string): ComputerSession | undefined {
+    return this.sessions.get(memoryKey)
+  }
+
+  async release(memoryKey: string) {
+    const session = this.sessions.get(memoryKey)
+    if (!session) return
+    this.sessions.delete(memoryKey)
+    try {
+      await session.close()
+    } catch (err) {
+      console.error(`[computer-mcp] (${memoryKey}) failed to close session:`, err)
+    }
+  }
+
   async closeAll() {
     const sessions = Array.from(this.sessions.values())
     this.sessions.clear()
@@ -877,8 +833,10 @@ class StreamManager {
     stream.closed = true
     this.streamsById.delete(stream.streamId)
     this.streamsByMemory.delete(stream.memoryKey)
-    const session = this.sessionManager.get(stream.memoryKey)
-    await session.stopHlsRecorder()
+    const session = this.sessionManager.peek(stream.memoryKey)
+    if (session) {
+      await session.stopHlsRecorder()
+    }
     try {
       await fs.rm(stream.dir, { recursive: true, force: true })
     } catch {}
@@ -896,24 +854,36 @@ class StreamManager {
 // -----------------------------------------------------------------------------
 // MCP Server registration
 // -----------------------------------------------------------------------------
-function buildComputerCallResult(action: ComputerAction, callId: string, shot: ScreenshotReference, description: string) {
-  const structuredContent = {
-    type: 'computer_call_output',
-    call_id: callId,
-    output: {
-      type: 'computer_screenshot',
-      image_url: shot.url,
-    },
-  }
+function buildComputerCallResult(_action: ComputerAction, base64Image: string) {
+  const dataUrl = `data:image/png;base64,${base64Image}`
 
   return {
-    structuredContent,
+    // structuredContent: {
+    //   images: [
+    //     { image_url: dataUrl },
+    //     // {
+    //     //   type: 'image_url' as const,
+    //     //   image_url: dataUrl,
+    //     // },
+    //   ],
+    // },
     content: [
       {
         type: 'text' as const,
-        text: JSON.stringify({ call_id: callId, action: action.type, description, screenshot_url: shot.url }, null, 2),
+        text: 'hello',
+      },
+      {
+        type: 'image_url' as const,
+        image_url: dataUrl,
       },
     ],
+    // content: [
+    //   {
+    //     type: 'image' as const,
+    //     data: base64Image,
+    //     mimeType: 'image/png',
+    //   },
+    // ],
   }
 }
 
@@ -930,22 +900,31 @@ function buildStreamResult(payload: Record<string, unknown>) {
 }
 
 function createComputerUseServer(memoryKey: string, context: ServerContext): McpServer {
-  const { config, sessionManager, screenshotStore, streamManager } = context
+  const { config, sessionManager, streamManager } = context
   const server = new McpServer({
     name: `Computer MCP Server (key=${memoryKey})`,
     version: '1.0.0',
   })
 
-  server.tool(
+  const callOutputSchema = {
+    images: z.array(z.object({
+      // type: z.literal('image_url'),
+      image_url: z.string(),
+    })),
+  }
+
+  server.registerTool(
     `${config.toolsPrefix}call`,
-    'Execute a computer-use action on the virtual browser.',
-    { action: actionSchema },
+    {
+      description: 'Perform an action on the virtual computer and return a screenshot.',
+      inputSchema: { action: actionSchema },
+      // outputSchema: callOutputSchema,
+    },
     async ({ action }) => {
       const session = sessionManager.get(memoryKey)
-      const callId = randomUUID()
       const result = await session.perform(action)
-      const shotRef = screenshotStore.store(result.screenshot.buffer, result.screenshot.contentType)
-      return buildComputerCallResult(action, callId, shotRef, result.description)
+      const base64Image = result.screenshot.buffer.toString('base64')
+      return buildComputerCallResult(action, base64Image)
     }
   )
 
@@ -1013,12 +992,23 @@ function createComputerUseServer(memoryKey: string, context: ServerContext): Mcp
 // -----------------------------------------------------------------------------
 // Transport helpers
 // -----------------------------------------------------------------------------
-function resolveMemoryKeyFromHeaders(req: Request, config: Config): string | undefined {
-  if (config.sessionMode === 'single') return 'single'
-  const headerName = config.sessionHeader as string
-  const value = req.headers[headerName.toLowerCase()]
-  if (typeof value !== 'string' || !value.trim()) return undefined
-  return value.trim()
+function httpRequestMetadata(req: Request) {
+  return {
+    method: req.method,
+    path: req.originalUrl || req.url,
+    sessionId: req.headers['mcp-session-id'] ?? null,
+    contentType: req.headers['content-type'] ?? null,
+    contentLength: req.headers['content-length'] ?? null,
+    userAgent: req.headers['user-agent'] ?? null,
+    remote: req.ip,
+  }
+}
+
+function logHttpEvent(req: Request, message: string, extra?: Record<string, unknown>) {
+  const meta = httpRequestMetadata(req)
+  const { method, path, ...rest } = meta
+  const payload = extra ? { ...rest, ...extra } : rest
+  console.log(`[computer-mcp] [http] ${method} ${path} ${message}`, payload)
 }
 
 function registerPreviewPage(app: Application, streams: StreamManager) {
@@ -1231,15 +1221,11 @@ async function main() {
     .option('environment', { type: 'string', default: 'browser' })
     .option('headless', { type: 'boolean', default: true })
     .option('defaultUrl', { type: 'string' })
-    .option('sessionMode', { type: 'string', choices: ['single', 'header'], default: 'single' })
-    .option('sessionHeader', { type: 'string' })
     .option('toolsPrefix', { type: 'string', default: 'computer_use_' })
     .option('publicBaseUrl', { type: 'string' })
     .option('streamFps', { type: 'number', default: 2 })
     .option('streamQuality', { type: 'number', default: 80 })
     .option('streamPath', { type: 'string', default: '/streams' })
-    .option('screenshotPath', { type: 'string', default: '/screenshots' })
-    .option('screenshotTtlMs', { type: 'number', default: 5 * 60 * 1000 })
     .option('enablePreview', { type: 'boolean', default: false, describe: 'Serve the /preview helper page to visualize HLS streams.' })
     .option('chromePath', { type: 'string', describe: 'Path to Chrome/Chromium executable launched by Puppeteer (default: bundled binary).' })
     .option('ffmpegPath', { type: 'string', describe: 'Path to ffmpeg binary used for display capture (default: ffmpeg).' })
@@ -1253,12 +1239,6 @@ async function main() {
     process.exit(1)
   }
 
-  if (argv.sessionMode === 'header' && (!argv.sessionHeader || !argv.sessionHeader.trim())) {
-    console.error('Error: --sessionHeader is required when --sessionMode=header')
-    process.exit(1)
-  }
-
-  const screenshotPath = normalizeRoutePath(argv.screenshotPath, '/screenshots')
   const streamPath = normalizeRoutePath(argv.streamPath, '/streams')
   const internalOrigin = `http://127.0.0.1:${argv.port}`
   const blankPageUrl = `${internalOrigin}/blank`
@@ -1280,12 +1260,8 @@ async function main() {
     environment: 'browser',
     headless: argv.headless,
     defaultUrl: argv.defaultUrl,
-    sessionMode: argv.sessionMode as Config['sessionMode'],
-    sessionHeader: argv.sessionHeader,
     toolsPrefix: argv.toolsPrefix ?? 'computer_use_',
     publicBaseUrl: argv.publicBaseUrl,
-    screenshotPath,
-    screenshotTtlMs: argv.screenshotTtlMs,
     streamPath,
     streamDefaults: {
       fps: Math.max(1, Math.min(30, argv.streamFps ?? 2)),
@@ -1301,10 +1277,9 @@ async function main() {
 
   const baseUrl = resolveBaseUrl(config)
   const sessionManager = new ComputerSessionManager(config)
-  const screenshotStore = new ScreenshotStore({ ttlMs: config.screenshotTtlMs, baseUrlFactory: () => baseUrl, path: config.screenshotPath })
   const streamManager = new StreamManager(config, sessionManager, { baseUrlFactory: () => baseUrl })
 
-  const context: ServerContext = { config, sessionManager, screenshotStore, streamManager }
+  const context: ServerContext = { config, sessionManager, streamManager }
 
   const createServerFor = (memoryKey: string) => createComputerUseServer(memoryKey, context)
 
@@ -1317,7 +1292,6 @@ async function main() {
     shuttingDown = true
     await streamManager.stopAll()
     await sessionManager.closeAll()
-    screenshotStore.stop()
     if (httpServer) {
       for (const socket of sockets) {
         try {
@@ -1339,7 +1313,7 @@ async function main() {
   process.on('SIGTERM', () => handleSignal('SIGTERM'))
 
   if (config.transport === 'stdio') {
-    const server = createServerFor(config.sessionMode === 'single' ? 'single' : 'stdio')
+    const server = createServerFor('stdio')
     const transport = new StdioServerTransport()
     await server.connect(transport)
     console.log('[computer-mcp] Listening on stdio')
@@ -1348,7 +1322,6 @@ async function main() {
     app.get('/healthz', (_req, res) => {
       res.json({ ok: true })
     })
-    screenshotStore.attachRoutes(app)
     streamManager.attachRoutes(app)
     registerBlankPage(app)
     if (config.enablePreview) {
@@ -1370,7 +1343,6 @@ async function main() {
   app.get('/healthz', (_req, res) => {
     res.json({ ok: true })
   })
-  screenshotStore.attachRoutes(app)
   streamManager.attachRoutes(app)
   registerBlankPage(app)
   if (config.enablePreview) {
@@ -1391,30 +1363,32 @@ async function main() {
     }
 
     const sessions = new Map<string, HttpSession>()
+    const eventStore = new InMemoryEventStore()
 
     app.post('/', async (req: Request, res: ExpressResponse) => {
       try {
         const sessionId = req.headers['mcp-session-id'] as string | undefined
+        logHttpEvent(req, 'POST / received', {
+          hasSessionHeader: Boolean(sessionId),
+          knownSessions: sessions.size,
+        })
         if (sessionId && sessions.has(sessionId)) {
-          const { transport } = sessions.get(sessionId)!
+          logHttpEvent(req, 'using existing session', { sessionId })
+          const entry = sessions.get(sessionId)!
+          const { transport } = entry
           await transport.handleRequest(req, res)
           return
         }
 
-        const memoryKey = resolveMemoryKeyFromHeaders(req, config)
-        if (!memoryKey) {
-          res.status(400).json({
-            jsonrpc: '2.0',
-            error: { code: -32000, message: `Bad Request: Missing or invalid \"${config.sessionHeader}\" header` },
-            id: (req as any)?.body?.id,
-          })
-          return
+        if (sessionId && !sessions.has(sessionId)) {
+          logHttpEvent(req, 'initializing new session for provided id', { sessionId })
         }
 
+        const memoryKey = randomUUID()
+
         const server = createServerFor(memoryKey)
-        const eventStore = new InMemoryEventStore()
         const transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: () => randomUUID(),
+          sessionIdGenerator: () => sessionId ?? randomUUID(),
           eventStore,
           onsessioninitialized: (newId: string) => {
             sessions.set(newId, { memoryKey, server, transport })
@@ -1422,20 +1396,39 @@ async function main() {
           },
         })
 
-        transport.onclose = async () => {
+        transport.onclose = () => {
           const sid = transport.sessionId
-          if (sid && sessions.has(sid)) {
+          const entry = sid ? sessions.get(sid) : undefined
+          if (sid && entry) {
             sessions.delete(sid)
             console.log(`[computer-mcp] [${sid}] Streamable transport closed`)
           }
-          try {
-            await server.close()
-          } catch {}
+          setImmediate(async () => {
+            try {
+              await server.close()
+            } catch (err) {
+              console.error(`[computer-mcp] [${sid ?? 'unknown'}] server close error:`, err)
+            }
+            if (entry) {
+              try {
+                await context.streamManager.stopStream(entry.memoryKey)
+              } catch (err) {
+                console.error(`[computer-mcp] (${entry.memoryKey}) stopStream after close error:`, err)
+              }
+              try {
+                await context.sessionManager.release(entry.memoryKey)
+              } catch (err) {
+                console.error(`[computer-mcp] (${entry.memoryKey}) release session error:`, err)
+              }
+            }
+          })
         }
 
         await server.connect(transport)
+        logHttpEvent(req, 'established new session', { memoryKey })
         await transport.handleRequest(req, res)
       } catch (err) {
+        logHttpEvent(req, 'POST / handler failed', { error: err instanceof Error ? err.message : String(err) })
         console.error('[computer-mcp] HTTP POST / error:', err)
         if (!res.headersSent) {
           res.status(500).json({
@@ -1450,6 +1443,10 @@ async function main() {
     app.get('/', async (req: Request, res: ExpressResponse) => {
       const sessionId = req.headers['mcp-session-id'] as string | undefined
       if (!sessionId || !sessions.has(sessionId)) {
+        logHttpEvent(req, 'GET / rejected: unknown or missing session', {
+          sessionId: sessionId ?? null,
+          knownSessions: sessions.size,
+        })
         res.status(400).json({
           jsonrpc: '2.0',
           error: { code: -32000, message: 'Bad Request: No valid session ID provided' },
@@ -1459,8 +1456,13 @@ async function main() {
       }
       try {
         const { transport } = sessions.get(sessionId)!
+        logHttpEvent(req, 'GET / streaming response', { sessionId })
         await transport.handleRequest(req, res)
       } catch (err) {
+        logHttpEvent(req, 'GET / handler failed', {
+          sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        })
         console.error(`[computer-mcp] [${sessionId}] GET / error:`, err)
         if (!res.headersSent) {
           res.status(500).json({
@@ -1475,6 +1477,10 @@ async function main() {
     app.delete('/', async (req: Request, res: ExpressResponse) => {
       const sessionId = req.headers['mcp-session-id'] as string | undefined
       if (!sessionId || !sessions.has(sessionId)) {
+        logHttpEvent(req, 'DELETE / rejected: unknown or missing session', {
+          sessionId: sessionId ?? null,
+          knownSessions: sessions.size,
+        })
         res.status(400).json({
           jsonrpc: '2.0',
           error: { code: -32000, message: 'Bad Request: No valid session ID provided' },
@@ -1484,8 +1490,13 @@ async function main() {
       }
       try {
         const { transport } = sessions.get(sessionId)!
+        logHttpEvent(req, 'DELETE / terminating session', { sessionId })
         await transport.handleRequest(req, res)
       } catch (err) {
+        logHttpEvent(req, 'DELETE / handler failed', {
+          sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        })
         console.error(`[computer-mcp] [${sessionId}] DELETE / error:`, err)
         if (!res.headersSent) {
           res.status(500).json({
@@ -1497,8 +1508,30 @@ async function main() {
       }
     })
 
+    app.use((err: unknown, req: Request, res: ExpressResponse, next: NextFunction) => {
+      if (res.headersSent) return next(err)
+      const message = err instanceof Error ? err.message : String(err)
+      const status = err instanceof SyntaxError ? 400 : 500
+      logHttpEvent(req, 'express middleware error', {
+        status,
+        error: message,
+      })
+      if (req.path === '/' && req.method === 'POST') {
+        res.status(status).json({
+          jsonrpc: '2.0',
+          error: {
+            code: status === 400 ? -32700 : -32603,
+            message: status === 400 ? 'Bad Request: Invalid JSON payload' : 'Internal server error',
+          },
+          id: (req as any)?.body?.id,
+        })
+        return
+      }
+      res.status(status).json({ error: message })
+    })
+
     httpServer = app.listen(config.port, () => {
-      console.log(`[computer-mcp] Listening on port ${config.port} (http) [sessionMode=${config.sessionMode}]`)
+      console.log(`[computer-mcp] Listening on port ${config.port} (http)`)
     })
     httpServer.on('connection', (socket) => {
       sockets.add(socket)
@@ -1523,17 +1556,7 @@ async function main() {
   let sessions: SseSession[] = []
 
   app.get('/', async (req: Request, res: ExpressResponse) => {
-    let memoryKey: string | undefined
-    if (config.sessionMode === 'single') {
-      memoryKey = 'single'
-    } else {
-      memoryKey = resolveMemoryKeyFromHeaders(req, config)
-      if (!memoryKey) {
-        res.status(400).json({ error: `Missing or invalid \"${config.sessionHeader}\" header` })
-        return
-      }
-    }
-
+    const memoryKey = randomUUID()
     const server = createServerFor(memoryKey)
     const transport = new SSEServerTransport('/message', res)
     await server.connect(transport)
@@ -1543,14 +1566,33 @@ async function main() {
     console.log(`[computer-mcp] [${sessionId}] SSE connected (key=${memoryKey})`)
 
     transport.onclose = async () => {
-      sessions = sessions.filter(s => s.transport !== transport)
-      try { await server.close() } catch {}
+      const index = sessions.findIndex(s => s.transport === transport)
+      const closed = index >= 0 ? sessions[index] : undefined
+      if (index >= 0) sessions.splice(index, 1)
+      setImmediate(async () => {
+        try {
+          await server.close()
+        } catch (err) {
+          console.error(`[computer-mcp] [${sessionId}] SSE server close error:`, err)
+        }
+        if (closed) {
+          try {
+            await context.streamManager.stopStream(closed.memoryKey)
+          } catch (err) {
+            console.error(`[computer-mcp] (${closed.memoryKey}) SSE stopStream error:`, err)
+          }
+          try {
+            await context.sessionManager.release(closed.memoryKey)
+          } catch (err) {
+            console.error(`[computer-mcp] (${closed.memoryKey}) SSE release error:`, err)
+          }
+        }
+      })
       console.log(`[computer-mcp] [${sessionId}] SSE closed`)
     }
 
     transport.onerror = (err: Error) => {
       console.error(`[computer-mcp] [${sessionId}] SSE error:`, err)
-      sessions = sessions.filter(s => s.transport !== transport)
     }
 
     req.on('close', () => {
@@ -1578,7 +1620,7 @@ async function main() {
   })
 
   httpServer = app.listen(config.port, () => {
-    console.log(`[computer-mcp] Listening on port ${config.port} (sse) [sessionMode=${config.sessionMode}]`)
+    console.log(`[computer-mcp] Listening on port ${config.port} (sse)`)
   })
   httpServer.on('connection', (socket) => {
     sockets.add(socket)

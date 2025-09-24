@@ -5,10 +5,10 @@ An MCP server that exposes a virtual browser session driven through computer-use
 ## Features
 
 - Supports the standard computer-use action set (click, double-click, drag, keypress, move, screenshot, scroll, type, wait).
-- Returns `computer_call_output` payloads with a resolvable screenshot URL for each tool invocation.
+- Returns `computer_call_output` payloads with a screenshot embedded as a `data:image/png;base64,...` URI for each tool invocation.
 - Provides `start_stream`, `get_stream`, and `stop_stream` tools for HLS video previews of the current session.
 - Works over stdio, SSE, or streamable HTTP transports.
-- Configurable viewport size, default URL, and multi-session routing via HTTP headers.
+- Configurable viewport size, default URL, and multiple transport modes.
 - Optional `/preview` page (enable with `--enablePreview`) to paste an HLS stream URL and watch the live browser.
 - Serves a local `/blank` page that guarantees capture-friendly content before the agent navigates elsewhere.
 - Powered by Xvfb + ffmpeg so the stream shows the full Chrome window (address bar, tabs, etc.).
@@ -47,7 +47,7 @@ The repository ships with a Dockerfile that installs Chromium, Xvfb, and ffmpeg.
 npm run start:docker -- --enablePreview
 ```
 
-The container exposes port `8000`, so you can open `http://localhost:8000/preview?key=single` on your host to watch the stream.
+The container exposes port `8000`, so you can open `http://localhost:8000/preview` on your host to watch the stream.
 
 ### Debian/Ubuntu / Fly.io (Dockerfile snippet)
 
@@ -97,15 +97,11 @@ Options:
   --environment <string>    Only "browser" is currently supported (default: "browser")
   --headless                Ignored for streaming; Chrome always runs headful so the video shows UI
   --defaultUrl <string>     Optional URL to load when a session starts
-  --sessionMode <mode>      "single" for shared session or "header" to key sessions by a request header (default: "single")
-  --sessionHeader <name>    Header name required when sessionMode is "header"
   --toolsPrefix <string>    Prefix added to registered tool names (default: "computer_use_")
   --publicBaseUrl <url>     Base URL used when constructing screenshot and stream links (default: http://localhost:<port>)
   --streamFps <number>      Default MJPEG stream FPS (1–30, default: 2)
   --streamQuality <number>  Default JPEG quality for streaming (10–100, default: 80)
-  --streamPath <path>       Route prefix for MJPEG streams (default: /streams)
-  --screenshotPath <path>   Route prefix for screenshot hosting (default: /screenshots)
-  --screenshotTtlMs <ms>    In-memory screenshot retention window (default: 300000)
+  --streamPath <path>       Route prefix for HLS streams (default: /streams)
   --enablePreview           When set, serve /preview to visualize HLS streams (default: false)
   --chromePath <path>       Chrome/Chromium executable launched by Puppeteer (default: bundled binary)
   --ffmpegPath <path>       ffmpeg binary used for display capture (default: ffmpeg)
@@ -118,7 +114,7 @@ Options:
 
 All tools are registered with the prefix configured through `--toolsPrefix` (default `computer_use_`).
 
-- `{prefix}call`: Accepts a `computer_call` payload matching the MCP computer-use schema. Executes the action, captures a screenshot, and returns a `computer_call_output` envelope with an image URL.
+- `{prefix}call`: Accepts a `computer_call` payload matching the MCP computer-use schema. Executes the action, captures a screenshot, and returns a `computer_call_output` envelope with a Base64 `data:image/png` URL.
 - `{prefix}start_stream`: Optional arguments `fps` and `quality`. Starts (or reconfigures) an HLS video stream and returns its URL, MIME type, and a `created` flag.
 - `{prefix}get_stream`: Optionally ensures a stream exists (starting one with defaults if needed) and returns the URL, MIME type, and a `created` flag indicating whether a new stream was launched.
 - `{prefix}stop_stream`: Stops the active stream. Accepts an optional `streamId` if multiple streams were negotiated out-of-band.
@@ -140,7 +136,6 @@ To navigate, send a keypress to focus the address bar (`{"action":{"type":"keypr
 
 Regardless of transport mode, the server binds HTTP routes for media:
 
-- `GET {screenshotPath}/:id` – Short-lived screenshots captured after actions.
 - `GET {streamPath}/:streamId/index.m3u8` – Live HLS playlist when enabled by the streaming tools (segments live alongside it).
 - `GET /preview` – Lightweight HTML page to paste a stream URL and preview the HLS feed (available when `--enablePreview` is set). The page will auto-fill the most recent active stream when possible.
 - `GET /blank` – Minimal capture-ready page used as the initial browser target.
