@@ -147,52 +147,45 @@ class VirtualDisplay {
 // -----------------------------------------------------------------------------
 // Schemas for Computer Use actions
 // -----------------------------------------------------------------------------
-const coordinateSchema = z.object({
-  x: z.number().int(),
-  y: z.number().int(),
-})
-
 const clickActionSchema = z.object({
   type: z.literal('click'),
-  x: z.number().int(),
-  y: z.number().int(),
+  x: z.number(),
+  y: z.number(),
   button: z.enum(['left', 'right', 'wheel', 'back', 'forward']),
 })
 
 const doubleClickActionSchema = z.object({
   type: z.literal('double_click'),
-  x: z.number().int(),
-  y: z.number().int(),
-  button: z.enum(['left', 'right', 'wheel', 'back', 'forward']).optional(),
+  x: z.number(),
+  y: z.number(),
 })
 
 const dragActionSchema = z.object({
   type: z.literal('drag'),
-  path: z.array(coordinateSchema).min(2),
+  path: z.array(z.object({ x: z.number(), y: z.number() })).min(1),
 })
 
 const keyPressActionSchema = z.object({
   type: z.literal('keypress'),
-  keys: z.array(z.string().min(1)).min(1),
+  keys: z.array(z.string()).min(1),
 })
 
 const moveActionSchema = z.object({
   type: z.literal('move'),
-  x: z.number().int(),
-  y: z.number().int(),
+  x: z.number(),
+  y: z.number(),
 })
 
 const screenshotActionSchema = z.object({
   type: z.literal('screenshot'),
-  full_page: z.boolean().optional(),
 })
 
 const scrollActionSchema = z.object({
   type: z.literal('scroll'),
-  scroll_x: z.number().int(),
-  scroll_y: z.number().int(),
-  x: z.number().int(),
-  y: z.number().int(),
+  x: z.number(),
+  y: z.number(),
+  scroll_x: z.number(),
+  scroll_y: z.number(),
 })
 
 const typeActionSchema = z.object({
@@ -202,8 +195,6 @@ const typeActionSchema = z.object({
 
 const waitActionSchema = z.object({
   type: z.literal('wait'),
-  milliseconds: z.number().int().positive().optional(),
-  seconds: z.number().int().positive().optional(),
 })
 
 const actionSchema = z.discriminatedUnion('type', [
@@ -293,7 +284,7 @@ function humanActionSummary(action: z.infer<typeof actionSchema>): string {
     case 'click':
       return `click ${action.button} at (${action.x}, ${action.y})`
     case 'double_click':
-      return `double_click ${(action.button ?? 'left')} at (${action.x}, ${action.y})`
+      return `double_click left at (${action.x}, ${action.y})`
     case 'drag':
       return `drag through ${action.path.length} points`
     case 'keypress':
@@ -301,13 +292,13 @@ function humanActionSummary(action: z.infer<typeof actionSchema>): string {
     case 'move':
       return `move pointer to (${action.x}, ${action.y})`
     case 'screenshot':
-      return action.full_page ? 'screenshot full page' : 'screenshot viewport'
+      return 'screenshot'
     case 'scroll':
       return `scroll by (x:${action.scroll_x}, y:${action.scroll_y})`
     case 'type':
       return `type ${action.text.length} characters`
     case 'wait':
-      return `wait ${action.milliseconds ?? (action.seconds ? action.seconds * 1000 : 1000)} ms`
+      return 'wait 1000 ms'
   }
   const exhaustive: never = action
   throw new Error(`Unsupported action type: ${(exhaustive as { type: string }).type}`)
@@ -600,7 +591,7 @@ class ComputerSession {
         return
       case 'double_click':
         await this.moveSystemPointer(action.x, action.y)
-        await page.mouse.click(action.x, action.y, { button: mapMouseButton(action.button ?? 'left'), clickCount: 2 })
+        await page.mouse.click(action.x, action.y, { button: 'left', clickCount: 2 })
         return
       case 'drag': {
         const [start, ...rest] = action.path
@@ -648,8 +639,7 @@ class ComputerSession {
         await page.keyboard.type(action.text)
         return
       case 'wait': {
-        const ms = action.milliseconds ?? (action.seconds ? action.seconds * 1000 : 1000)
-        await delay(ms)
+        await delay(1000)
         return
       }
       default:
@@ -855,35 +845,14 @@ class StreamManager {
 // MCP Server registration
 // -----------------------------------------------------------------------------
 function buildComputerCallResult(_action: ComputerAction, base64Image: string) {
-  const dataUrl = `data:image/png;base64,${base64Image}`
-
   return {
-    // structuredContent: {
-    //   images: [
-    //     { image_url: dataUrl },
-    //     // {
-    //     //   type: 'image_url' as const,
-    //     //   image_url: dataUrl,
-    //     // },
-    //   ],
-    // },
     content: [
       {
-        type: 'text' as const,
-        text: 'hello',
-      },
-      {
-        type: 'image_url' as const,
-        image_url: dataUrl,
+        type: 'image' as const,
+        data: base64Image,
+        mimeType: 'image/png',
       },
     ],
-    // content: [
-    //   {
-    //     type: 'image' as const,
-    //     data: base64Image,
-    //     mimeType: 'image/png',
-    //   },
-    // ],
   }
 }
 
@@ -906,19 +875,11 @@ function createComputerUseServer(memoryKey: string, context: ServerContext): Mcp
     version: '1.0.0',
   })
 
-  const callOutputSchema = {
-    images: z.array(z.object({
-      // type: z.literal('image_url'),
-      image_url: z.string(),
-    })),
-  }
-
   server.registerTool(
     `${config.toolsPrefix}call`,
     {
       description: 'Perform an action on the virtual computer and return a screenshot.',
       inputSchema: { action: actionSchema },
-      // outputSchema: callOutputSchema,
     },
     async ({ action }) => {
       const session = sessionManager.get(memoryKey)
@@ -1221,7 +1182,7 @@ async function main() {
     .option('environment', { type: 'string', default: 'browser' })
     .option('headless', { type: 'boolean', default: true })
     .option('defaultUrl', { type: 'string' })
-    .option('toolsPrefix', { type: 'string', default: 'computer_use_' })
+    .option('toolsPrefix', { type: 'string', default: 'computer_' })
     .option('publicBaseUrl', { type: 'string' })
     .option('streamFps', { type: 'number', default: 2 })
     .option('streamQuality', { type: 'number', default: 80 })
@@ -1260,7 +1221,7 @@ async function main() {
     environment: 'browser',
     headless: argv.headless,
     defaultUrl: argv.defaultUrl,
-    toolsPrefix: argv.toolsPrefix ?? 'computer_use_',
+    toolsPrefix: argv.toolsPrefix ?? 'computer_',
     publicBaseUrl: argv.publicBaseUrl,
     streamPath,
     streamDefaults: {

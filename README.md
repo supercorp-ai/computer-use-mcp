@@ -97,7 +97,7 @@ Options:
   --environment <string>    Only "browser" is currently supported (default: "browser")
   --headless                Ignored for streaming; Chrome always runs headful so the video shows UI
   --defaultUrl <string>     Optional URL to load when a session starts
-  --toolsPrefix <string>    Prefix added to registered tool names (default: "computer_use_")
+  --toolsPrefix <string>    Prefix added to registered tool names (default: "computer_")
   --publicBaseUrl <url>     Base URL used when constructing screenshot and stream links (default: http://localhost:<port>)
   --streamFps <number>      Default MJPEG stream FPS (1–30, default: 2)
   --streamQuality <number>  Default JPEG quality for streaming (10–100, default: 80)
@@ -112,7 +112,7 @@ Options:
 
 ## Tools
 
-All tools are registered with the prefix configured through `--toolsPrefix` (default `computer_use_`).
+All tools are registered with the prefix configured through `--toolsPrefix` (default `computer_`).
 
 - `{prefix}call`: Accepts a `computer_call` payload matching the MCP computer-use schema. Executes the action, captures a screenshot, and returns a `computer_call_output` envelope with a Base64 `data:image/png` URL.
 - `{prefix}start_stream`: Optional arguments `fps` and `quality`. Starts (or reconfigures) an HLS video stream and returns its URL, MIME type, and a `created` flag.
