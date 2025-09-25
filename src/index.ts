@@ -972,11 +972,11 @@ function logHttpEvent(req: Request, message: string, extra?: Record<string, unkn
   console.log(`[computer-mcp] [http] ${method} ${path} ${message}`, payload)
 }
 
-function registerPreviewPage(app: Application, streams: StreamManager) {
+function registerPreviewPage(app: Application, streams: StreamManager, defaultMemoryKey: string) {
   app.get('/preview', (req: Request, res: ExpressResponse) => {
     const streamUrlParam = typeof req.query.url === 'string' ? req.query.url : ''
     const memoryKeyParam = typeof req.query.key === 'string' ? req.query.key : undefined
-    const defaultStream = streams.getActiveStreamSummary(memoryKeyParam)
+    const defaultStream = streams.getActiveStreamSummary(memoryKeyParam ?? defaultMemoryKey)
     const initialUrl = streamUrlParam || defaultStream?.url || ''
     const html = `<!doctype html>
 <html lang="en">
@@ -1174,6 +1174,7 @@ function registerBlankPage(app: Application) {
 // Entrypoint
 // -----------------------------------------------------------------------------
 async function main() {
+  const SHARED_MEMORY_KEY = 'shared'
   const argv = yargs(hideBin(process.argv))
     .option('port', { type: 'number', default: 8000 })
     .option('transport', { type: 'string', choices: ['sse', 'stdio', 'http'], default: 'http' })
@@ -1242,7 +1243,7 @@ async function main() {
 
   const context: ServerContext = { config, sessionManager, streamManager }
 
-  const createServerFor = (memoryKey: string) => createComputerUseServer(memoryKey, context)
+  const createServer = () => createComputerUseServer(SHARED_MEMORY_KEY, context)
 
   let httpServer: Server | undefined
   const sockets = new Set<Socket>()
@@ -1274,7 +1275,7 @@ async function main() {
   process.on('SIGTERM', () => handleSignal('SIGTERM'))
 
   if (config.transport === 'stdio') {
-    const server = createServerFor('stdio')
+    const server = createServer()
     const transport = new StdioServerTransport()
     await server.connect(transport)
     console.log('[computer-mcp] Listening on stdio')
@@ -1286,7 +1287,7 @@ async function main() {
     streamManager.attachRoutes(app)
     registerBlankPage(app)
     if (config.enablePreview) {
-      registerPreviewPage(app, streamManager)
+      registerPreviewPage(app, streamManager, SHARED_MEMORY_KEY)
     }
     httpServer = app.listen(config.port, () => {
       console.log(`[computer-mcp] Serving media endpoints on port ${config.port}`)
@@ -1307,7 +1308,7 @@ async function main() {
   streamManager.attachRoutes(app)
   registerBlankPage(app)
   if (config.enablePreview) {
-    registerPreviewPage(app, streamManager)
+    registerPreviewPage(app, streamManager, SHARED_MEMORY_KEY)
   }
 
   if (config.transport === 'http') {
@@ -1318,7 +1319,6 @@ async function main() {
     })
 
     interface HttpSession {
-      memoryKey: string
       server: McpServer
       transport: StreamableHTTPServerTransport
     }
@@ -1335,8 +1335,7 @@ async function main() {
         })
         if (sessionId && sessions.has(sessionId)) {
           logHttpEvent(req, 'using existing session', { sessionId })
-          const entry = sessions.get(sessionId)!
-          const { transport } = entry
+          const { transport } = sessions.get(sessionId)!
           await transport.handleRequest(req, res)
           return
         }
@@ -1345,15 +1344,13 @@ async function main() {
           logHttpEvent(req, 'initializing new session for provided id', { sessionId })
         }
 
-        const memoryKey = randomUUID()
-
-        const server = createServerFor(memoryKey)
+        const server = createServer()
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => sessionId ?? randomUUID(),
           eventStore,
           onsessioninitialized: (newId: string) => {
-            sessions.set(newId, { memoryKey, server, transport })
-            console.log(`[computer-mcp] [${newId}] HTTP session initialized for key ${memoryKey}`)
+            sessions.set(newId, { server, transport })
+            console.log(`[computer-mcp] [${newId}] HTTP session initialized (shared)`)
           },
         })
 
@@ -1372,21 +1369,16 @@ async function main() {
             }
             if (entry) {
               try {
-                await context.streamManager.stopStream(entry.memoryKey)
+                await context.streamManager.stopStream(SHARED_MEMORY_KEY)
               } catch (err) {
-                console.error(`[computer-mcp] (${entry.memoryKey}) stopStream after close error:`, err)
-              }
-              try {
-                await context.sessionManager.release(entry.memoryKey)
-              } catch (err) {
-                console.error(`[computer-mcp] (${entry.memoryKey}) release session error:`, err)
+                console.error(`[computer-mcp] (${SHARED_MEMORY_KEY}) stopStream after close error:`, err)
               }
             }
           })
         }
 
         await server.connect(transport)
-        logHttpEvent(req, 'established new session', { memoryKey })
+        logHttpEvent(req, 'established new session', { memoryKey: SHARED_MEMORY_KEY })
         await transport.handleRequest(req, res)
       } catch (err) {
         logHttpEvent(req, 'POST / handler failed', { error: err instanceof Error ? err.message : String(err) })
@@ -1508,7 +1500,6 @@ async function main() {
   })
 
   interface SseSession {
-    memoryKey: string
     server: McpServer
     transport: SSEServerTransport
     sessionId: string
@@ -1517,14 +1508,13 @@ async function main() {
   let sessions: SseSession[] = []
 
   app.get('/', async (req: Request, res: ExpressResponse) => {
-    const memoryKey = randomUUID()
-    const server = createServerFor(memoryKey)
+    const server = createServer()
     const transport = new SSEServerTransport('/message', res)
     await server.connect(transport)
     const sessionId = transport.sessionId
 
-    sessions.push({ memoryKey, server, transport, sessionId })
-    console.log(`[computer-mcp] [${sessionId}] SSE connected (key=${memoryKey})`)
+    sessions.push({ server, transport, sessionId })
+    console.log(`[computer-mcp] [${sessionId}] SSE connected (shared)`)
 
     transport.onclose = async () => {
       const index = sessions.findIndex(s => s.transport === transport)
@@ -1538,14 +1528,9 @@ async function main() {
         }
         if (closed) {
           try {
-            await context.streamManager.stopStream(closed.memoryKey)
+            await context.streamManager.stopStream(SHARED_MEMORY_KEY)
           } catch (err) {
-            console.error(`[computer-mcp] (${closed.memoryKey}) SSE stopStream error:`, err)
-          }
-          try {
-            await context.sessionManager.release(closed.memoryKey)
-          } catch (err) {
-            console.error(`[computer-mcp] (${closed.memoryKey}) SSE release error:`, err)
+            console.error(`[computer-mcp] (${SHARED_MEMORY_KEY}) SSE stopStream error:`, err)
           }
         }
       })
