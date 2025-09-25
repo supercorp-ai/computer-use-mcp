@@ -16,5 +16,4 @@ call_tool() {
 }
 
 # Start move
-call_tool '{"jsonrpc":"2.0","id":"move","method":"tools/call","params":{"name":"computer_use_call","arguments":{"action":{"type":"move","x":100,"y":100}}}}'
-
+call_tool '{"jsonrpc":"2.0","id":"move","method":"tools/call","params":{"name":"computer_call","arguments":{"action":{"type":"move","x":100,"y":100}}}}'

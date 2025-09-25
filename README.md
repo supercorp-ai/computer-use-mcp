@@ -6,10 +6,10 @@ An MCP server that exposes a virtual browser session driven through computer-use
 
 - Supports the standard computer-use action set (click, double-click, drag, keypress, move, screenshot, scroll, type, wait).
 - Returns `computer_call_output` payloads with a screenshot embedded as a `data:image/png;base64,...` URI for each tool invocation.
-- Provides `start_stream`, `get_stream`, and `stop_stream` tools for HLS video previews of the current session.
+- Optional HLS streaming with a shared browser window; pass `--stream auto` to launch it automatically and `--stream functions` to expose `start_stream`, `get_stream`, and `stop_stream` MCP tools.
 - Works over stdio, SSE, or streamable HTTP transports.
 - Configurable viewport size, default URL, and multiple transport modes.
-- Optional `/preview` page (enable with `--enablePreview`) to paste an HLS stream URL and watch the live browser.
+- Optional preview page (set `--previewPath`) that displays the shared HLS feed.
 - Serves a local `/blank` page that guarantees capture-friendly content before the agent navigates elsewhere.
 - Powered by Xvfb + ffmpeg so the stream shows the full Chrome window (address bar, tabs, etc.).
 
@@ -31,7 +31,10 @@ brew install ffmpeg
 brew install xdotool
 
 # Launch the server, pointing to the Homebrew Xvfb binary
-npm start -- --enablePreview \
+npm start -- \
+  --stream auto \
+  --stream functions \
+  --previewPath /preview \
   --xvfbPath /opt/X11/bin/Xvfb \
   --ffmpegPath "$(which ffmpeg)"
 
@@ -44,7 +47,7 @@ npm run start:mac
 The repository ships with a Dockerfile that installs Chromium, Xvfb, and ffmpeg. Build and run it with:
 
 ```bash
-npm run start:docker -- --enablePreview
+npm run start:docker -- --stream auto --stream functions --previewPath /preview
 ```
 
 The container exposes port `8000`, so you can open `http://localhost:8000/preview` on your host to watch the stream.
@@ -102,7 +105,8 @@ Options:
   --streamFps <number>      Default MJPEG stream FPS (1–30, default: 2)
   --streamQuality <number>  Default JPEG quality for streaming (10–100, default: 80)
   --streamPath <path>       Route prefix for HLS streams (default: /streams)
-  --enablePreview           When set, serve /preview to visualize HLS streams (default: false)
+  --stream <mode>           Enable streaming features (modes: auto, functions). Pass multiple times.
+  --previewPath <path>      Mount the HTML preview page at the given path (requires --stream)
   --chromePath <path>       Chrome/Chromium executable launched by Puppeteer (default: bundled binary)
   --ffmpegPath <path>       ffmpeg binary used for display capture (default: ffmpeg)
   --xvfbPath <path>         Xvfb binary used for the virtual display (default: Xvfb)
@@ -110,22 +114,25 @@ Options:
   -h, --help                Show help
 ```
 
+Example streaming setups:
+
+- `--stream auto` – start the HLS feed automatically.
+- `--stream functions` – keep streaming manual but expose MCP tools.
+- Pass both flags to enable automatic streaming and the MCP controls.
+
 ## Tools
 
 All tools are registered with the prefix configured through `--toolsPrefix` (default `computer_`).
 
 - `{prefix}call`: Accepts a `computer_call` payload matching the MCP computer-use schema. Executes the action, captures a screenshot, and returns a `computer_call_output` envelope with a Base64 `data:image/png` URL.
-- `{prefix}start_stream`: Optional arguments `fps` and `quality`. Starts (or reconfigures) an HLS video stream and returns its URL, MIME type, and a `created` flag.
-- `{prefix}get_stream`: Optionally ensures a stream exists (starting one with defaults if needed) and returns the URL, MIME type, and a `created` flag indicating whether a new stream was launched.
-- `{prefix}stop_stream`: Stops the active stream. Accepts an optional `streamId` if multiple streams were negotiated out-of-band.
+- When `--stream functions` is provided, the server also exposes `{prefix}start_stream`, `{prefix}get_stream`, and `{prefix}stop_stream` for managing the shared HLS feed.
 
 ### Example actions
 
 ```json
 {
   "action": {
-    "type": "screenshot",
-    "full_page": false
+    "type": "screenshot"
   }
 }
 ```
@@ -136,8 +143,8 @@ To navigate, send a keypress to focus the address bar (`{"action":{"type":"keypr
 
 Regardless of transport mode, the server binds HTTP routes for media:
 
-- `GET {streamPath}/:streamId/index.m3u8` – Live HLS playlist when enabled by the streaming tools (segments live alongside it).
-- `GET /preview` – Lightweight HTML page to paste a stream URL and preview the HLS feed (available when `--enablePreview` is set). The page will auto-fill the most recent active stream when possible.
+- `GET {streamPath}/:streamId/index.m3u8` – Live HLS playlist when streaming is enabled.
+- `GET {previewPath}` – Lightweight HTML page that shows the shared HLS feed (available when `--previewPath` is supplied).
 - `GET /blank` – Minimal capture-ready page used as the initial browser target.
 - `GET /healthz` – Basic liveness probe.
 

@@ -37,7 +37,9 @@ interface Config {
   publicBaseUrl?: string
   streamPath: string
   streamDefaults: { fps: number; quality: number }
-  enablePreview: boolean
+  streamEnabled: boolean
+  streamFunctions: boolean
+  previewPath?: string
   chromePath?: string
   ffmpegPath: string
   xvfbPath: string
@@ -889,63 +891,65 @@ function createComputerUseServer(memoryKey: string, context: ServerContext): Mcp
     }
   )
 
-  server.tool(
-    `${config.toolsPrefix}start_stream`,
-    'Begin an HLS stream for the current session. Returns a URL to view the live browser.',
-    {
-      fps: z.number().int().min(1).max(30).optional(),
-      quality: z.number().int().min(10).max(100).optional(),
-      // TODO: remove optional comment workaround once MCP SDK bug is fixed
-      comment: z.string().optional(),
-    },
-    async (args) => {
-      const stream = await streamManager.startStream(memoryKey, { fps: args.fps, quality: args.quality })
-      return buildStreamResult({
-        type: 'computer_stream_started',
-        stream_id: stream.streamId,
-        stream_url: stream.url,
-        stream_mime_type: 'application/vnd.apple.mpegurl',
-        created: stream.created,
-      })
-    }
-  )
+  if (config.streamFunctions) {
+    server.tool(
+      `${config.toolsPrefix}start_stream`,
+      'Begin an HLS stream for the current session. Returns a URL to view the live browser.',
+      {
+        fps: z.number().int().min(1).max(30).optional(),
+        quality: z.number().int().min(10).max(100).optional(),
+        // TODO: remove optional comment workaround once MCP SDK bug is fixed
+        comment: z.string().optional(),
+      },
+      async (args) => {
+        const stream = await streamManager.startStream(memoryKey, { fps: args.fps, quality: args.quality })
+        return buildStreamResult({
+          type: 'computer_stream_started',
+          stream_id: stream.streamId,
+          stream_url: stream.url,
+          stream_mime_type: 'application/vnd.apple.mpegurl',
+          created: stream.created,
+        })
+      }
+    )
 
-  server.tool(
-    `${config.toolsPrefix}get_stream`,
-    'Ensure an HLS stream is active and return its URL.',
-    {
-      fps: z.number().int().min(1).max(30).optional(),
-      quality: z.number().int().min(10).max(100).optional(),
-      comment: z.string().optional(),
-    },
-    async (args) => {
-      const stream = await streamManager.getStream(memoryKey, { fps: args.fps, quality: args.quality })
-      return buildStreamResult({
-        type: 'computer_stream_ready',
-        stream_id: stream.streamId,
-        stream_url: stream.url,
-        stream_mime_type: 'application/vnd.apple.mpegurl',
-        created: stream.created,
-      })
-    }
-  )
+    server.tool(
+      `${config.toolsPrefix}get_stream`,
+      'Ensure an HLS stream is active and return its URL.',
+      {
+        fps: z.number().int().min(1).max(30).optional(),
+        quality: z.number().int().min(10).max(100).optional(),
+        comment: z.string().optional(),
+      },
+      async (args) => {
+        const stream = await streamManager.getStream(memoryKey, { fps: args.fps, quality: args.quality })
+        return buildStreamResult({
+          type: 'computer_stream_ready',
+          stream_id: stream.streamId,
+          stream_url: stream.url,
+          stream_mime_type: 'application/vnd.apple.mpegurl',
+          created: stream.created,
+        })
+      }
+    )
 
-  server.tool(
-    `${config.toolsPrefix}stop_stream`,
-    'Stop the active HLS stream for the current session.',
-    {
-      streamId: z.string().optional(),
-      comment: z.string().optional(),
-    },
-    async (args) => {
-      const stopped = await streamManager.stopStream(memoryKey, args.streamId)
-      return buildStreamResult({
-        type: 'computer_stream_stopped',
-        stopped: stopped.stopped,
-        stream_id: stopped.streamId,
-      })
-    }
-  )
+    server.tool(
+      `${config.toolsPrefix}stop_stream`,
+      'Stop the active HLS stream for the current session.',
+      {
+        streamId: z.string().optional(),
+        comment: z.string().optional(),
+      },
+      async (args) => {
+        const stopped = await streamManager.stopStream(memoryKey, args.streamId)
+        return buildStreamResult({
+          type: 'computer_stream_stopped',
+          stopped: stopped.stopped,
+          stream_id: stopped.streamId,
+        })
+      }
+    )
+  }
 
   return server
 }
@@ -972,12 +976,10 @@ function logHttpEvent(req: Request, message: string, extra?: Record<string, unkn
   console.log(`[computer-mcp] [http] ${method} ${path} ${message}`, payload)
 }
 
-function registerPreviewPage(app: Application, streams: StreamManager, defaultMemoryKey: string) {
-  app.get('/preview', (req: Request, res: ExpressResponse) => {
-    const streamUrlParam = typeof req.query.url === 'string' ? req.query.url : ''
-    const memoryKeyParam = typeof req.query.key === 'string' ? req.query.key : undefined
-    const defaultStream = streams.getActiveStreamSummary(memoryKeyParam ?? defaultMemoryKey)
-    const initialUrl = streamUrlParam || defaultStream?.url || ''
+function registerPreviewPage(app: Application, streams: StreamManager, defaultMemoryKey: string, routePath: string) {
+  app.get(routePath, (req: Request, res: ExpressResponse) => {
+    const defaultStream = streams.getActiveStreamSummary(defaultMemoryKey)
+    const initialUrl = defaultStream?.url || ''
     const html = `<!doctype html>
 <html lang="en">
   <head>
@@ -990,11 +992,6 @@ function registerPreviewPage(app: Application, streams: StreamManager, defaultMe
       body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; padding: 24px; background: #111; color: #f7f7f7; }
       main { max-width: 960px; margin: 0 auto; }
       h1 { margin-top: 0; font-size: 1.75rem; }
-      form { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 16px; }
-      label { font-weight: 600; }
-      input[type="url"] { flex: 1; min-width: 260px; padding: 8px 10px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.25); background: rgba(17,17,17,0.9); color: inherit; }
-      button { padding: 8px 16px; border: none; border-radius: 6px; background: #2f80ed; color: white; font-weight: 600; cursor: pointer; }
-      button:hover { background: #1d6fd8; }
       .viewer { border: 1px solid rgba(255,255,255,0.2); border-radius: 8px; min-height: 360px; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.04); overflow: hidden; }
       .viewer video { max-width: 100%; width: 100%; background: black; display: none; border-radius: 8px; }
       .placeholder { opacity: 0.7; text-align: center; padding: 40px 20px; }
@@ -1005,67 +1002,23 @@ function registerPreviewPage(app: Application, streams: StreamManager, defaultMe
   <body>
     <main>
       <h1>Computer Stream Preview</h1>
-      <form id="streamForm">
-        <label for="streamUrl">Stream URL</label>
-        <input type="url" id="streamUrl" name="url" placeholder="Paste the HLS playlist URL" autocomplete="off" />
-        <button type="submit">Load Stream</button>
-      </form>
       <div class="viewer">
         <video id="streamVideo" autoplay playsinline muted controls></video>
-        <div id="placeholder" class="placeholder">${defaultStream ? 'An active stream was detected automatically. Paste another URL or click “Load Stream” to reconnect.' : 'Paste a stream URL returned by the MCP server to preview the browser.'}</div>
+        <div id="placeholder" class="placeholder">${defaultStream ? 'Loading shared browser stream…' : 'No active stream. Start one with the MCP tools or enable --stream auto.'}</div>
       </div>
-      <p class="info">Tip: Use the <code>get_stream</code> or <code>start_stream</code> MCP tools to retrieve the HLS playlist URL, then paste it here.</p>
+      <p class="info">The preview shows the shared browser stream returned by the MCP server.</p>
     </main>
     <script>
       (function() {
         var initialUrl = ${JSON.stringify(initialUrl)};
-        var initialKey = ${JSON.stringify(memoryKeyParam ?? '')};
-        var defaultDetected = ${defaultStream ? 'true' : 'false'} === 'true';
-        var form = document.getElementById('streamForm');
-        var input = document.getElementById('streamUrl');
         var video = document.getElementById('streamVideo');
         var placeholder = document.getElementById('placeholder');
-        var loadTimer;
         var hlsInstance = null;
 
         function destroyHls() {
           if (hlsInstance) {
             hlsInstance.destroy();
             hlsInstance = null;
-          }
-        }
-
-        function normalizeUrl(rawUrl) {
-          if (!rawUrl) return '';
-          var trimmed = rawUrl.trim();
-          try {
-            var target = new URL(trimmed, window.location.href);
-            if (target.pathname.indexOf('/streams/') === 0 && target.pathname.indexOf('/index.m3u8', target.pathname.length - '/index.m3u8'.length) === -1) {
-              while (target.pathname.length > 1 && target.pathname.charAt(target.pathname.length - 1) === '/') {
-                target.pathname = target.pathname.slice(0, -1);
-              }
-              target.pathname += '/index.m3u8';
-            }
-            return target.toString();
-          } catch (err) {
-            return trimmed;
-          }
-        }
-
-        function syncQuery(url) {
-          try {
-            var current = new URL(window.location.href);
-            if (url) {
-              current.searchParams.set('url', url);
-            } else {
-              current.searchParams.delete('url');
-            }
-            if (initialKey) {
-              current.searchParams.set('key', initialKey);
-            }
-            window.history.replaceState(null, '', current.toString());
-          } catch (err) {
-            console.warn('Unable to update URL parameters:', err);
           }
         }
 
@@ -1080,7 +1033,7 @@ function registerPreviewPage(app: Application, streams: StreamManager, defaultMe
           if (!url) {
             video.removeAttribute('src');
             video.load();
-            setStatus('Paste a stream URL returned by the MCP server to preview the browser.');
+            setStatus('No active stream. Start one with the MCP tools or enable --stream auto.');
             return;
           }
 
@@ -1117,40 +1070,14 @@ function registerPreviewPage(app: Application, streams: StreamManager, defaultMe
           setStatus('HLS playback is not supported in this browser. Try Safari or install an MSE-capable browser.');
         }
 
-        form.addEventListener('submit', function(event) {
-          event.preventDefault();
-          var url = normalizeUrl(input.value);
-          playStream(url);
-          syncQuery(url);
-        });
-
-        input.addEventListener('input', function() {
-          var value = input.value;
-          if (!value) {
-            clearTimeout(loadTimer);
-            playStream('');
-            syncQuery('');
-            return;
-          }
-          clearTimeout(loadTimer);
-          loadTimer = setTimeout(function() {
-            var normalized = normalizeUrl(value);
-            playStream(normalized);
-            syncQuery(normalized);
-          }, 250);
-        });
-
         video.addEventListener('error', function() {
-          setStatus('Unable to load stream. Verify the URL is reachable from this server.');
+          setStatus('Unable to load stream. Ensure the server is hosting HLS segments.');
         });
 
-        var bootstrapUrl = normalizeUrl(initialUrl || '');
-        if (bootstrapUrl) {
-          input.value = bootstrapUrl;
-          playStream(bootstrapUrl);
-          syncQuery(bootstrapUrl);
-        } else if (defaultDetected) {
-          setStatus('An active stream was detected automatically. Paste another URL or click “Load Stream” to reconnect.');
+        if (initialUrl) {
+          playStream(initialUrl);
+        } else {
+          setStatus('No active stream. Start one with the MCP tools or enable --stream auto.');
         }
 
         window.addEventListener('beforeunload', function() {
@@ -1188,7 +1115,12 @@ async function main() {
     .option('streamFps', { type: 'number', default: 2 })
     .option('streamQuality', { type: 'number', default: 80 })
     .option('streamPath', { type: 'string', default: '/streams' })
-    .option('enablePreview', { type: 'boolean', default: false, describe: 'Serve the /preview helper page to visualize HLS streams.' })
+    .option('stream', {
+      type: 'array',
+      string: true,
+      describe: 'Enable streaming features (e.g. --stream auto --stream functions).'
+    })
+    .option('previewPath', { type: 'string', describe: 'Mount an HTML preview page at the given path (requires --stream).' })
     .option('chromePath', { type: 'string', describe: 'Path to Chrome/Chromium executable launched by Puppeteer (default: bundled binary).' })
     .option('ffmpegPath', { type: 'string', describe: 'Path to ffmpeg binary used for display capture (default: ffmpeg).' })
     .option('xvfbPath', { type: 'string', describe: 'Path to Xvfb binary used for virtual display (default: Xvfb).' })
@@ -1198,6 +1130,25 @@ async function main() {
 
   if (argv.environment !== 'browser') {
     console.error(`Unsupported environment: ${argv.environment}. Only "browser" is supported.`)
+    process.exit(1)
+  }
+
+  const streamModeInputs = (argv.stream ?? []).map(mode => mode.toLowerCase())
+  const validStreamModes = new Set(['auto', 'functions'])
+  for (const mode of streamModeInputs) {
+    if (!validStreamModes.has(mode)) {
+      console.error(`Error: unknown --stream mode "${mode}". Expected one of: auto, functions.`)
+      process.exit(1)
+    }
+  }
+
+  const streamModes = new Set(streamModeInputs)
+  const streamAutoEnabled = streamModes.has('auto')
+  const streamFunctionsEnabled = streamModes.has('functions')
+  const streamEnabled = streamAutoEnabled || streamFunctionsEnabled
+
+  if (argv.previewPath && !streamEnabled) {
+    console.error('Error: --previewPath requires --stream to be enabled.')
     process.exit(1)
   }
 
@@ -1214,6 +1165,8 @@ async function main() {
     chromeExecutable = argv.chromePath?.trim()
   }
 
+  const previewRoute = argv.previewPath && argv.previewPath.trim() ? normalizeRoutePath(argv.previewPath.trim(), '/preview') : undefined
+
   const config: Config = {
     port: argv.port,
     transport: argv.transport as Config['transport'],
@@ -1229,7 +1182,9 @@ async function main() {
       fps: Math.max(1, Math.min(30, argv.streamFps ?? 2)),
       quality: Math.max(10, Math.min(100, argv.streamQuality ?? 80)),
     },
-    enablePreview: argv.enablePreview ?? false,
+    streamEnabled,
+    streamFunctions: streamFunctionsEnabled,
+    previewPath: previewRoute,
     chromePath: chromeExecutable,
     ffmpegPath: argv.ffmpegPath && argv.ffmpegPath.trim() ? argv.ffmpegPath.trim() : 'ffmpeg',
     xvfbPath: argv.xvfbPath && argv.xvfbPath.trim() ? argv.xvfbPath.trim() : 'Xvfb',
@@ -1244,6 +1199,18 @@ async function main() {
   const context: ServerContext = { config, sessionManager, streamManager }
 
   const createServer = () => createComputerUseServer(SHARED_MEMORY_KEY, context)
+
+  if (streamAutoEnabled) {
+    void streamManager
+      .startStream(SHARED_MEMORY_KEY)
+      .then(stream => {
+        const location = stream.url ?? `${stream.streamId}`
+        console.log(`[computer-mcp] default stream ready (${location})`)
+      })
+      .catch(err => {
+        console.error('[computer-mcp] failed to start default stream:', err)
+      })
+  }
 
   let httpServer: Server | undefined
   const sockets = new Set<Socket>()
@@ -1284,10 +1251,12 @@ async function main() {
     app.get('/healthz', (_req, res) => {
       res.json({ ok: true })
     })
-    streamManager.attachRoutes(app)
+    if (config.streamEnabled || config.previewPath) {
+      streamManager.attachRoutes(app)
+    }
     registerBlankPage(app)
-    if (config.enablePreview) {
-      registerPreviewPage(app, streamManager, SHARED_MEMORY_KEY)
+    if (config.previewPath) {
+      registerPreviewPage(app, streamManager, SHARED_MEMORY_KEY, config.previewPath)
     }
     httpServer = app.listen(config.port, () => {
       console.log(`[computer-mcp] Serving media endpoints on port ${config.port}`)
@@ -1305,10 +1274,12 @@ async function main() {
   app.get('/healthz', (_req, res) => {
     res.json({ ok: true })
   })
-  streamManager.attachRoutes(app)
+  if (config.streamEnabled || config.previewPath) {
+    streamManager.attachRoutes(app)
+  }
   registerBlankPage(app)
-  if (config.enablePreview) {
-    registerPreviewPage(app, streamManager, SHARED_MEMORY_KEY)
+  if (config.previewPath) {
+    registerPreviewPage(app, streamManager, SHARED_MEMORY_KEY, config.previewPath)
   }
 
   if (config.transport === 'http') {
@@ -1368,10 +1339,12 @@ async function main() {
               console.error(`[computer-mcp] [${sid ?? 'unknown'}] server close error:`, err)
             }
             if (entry) {
-              try {
-                await context.streamManager.stopStream(SHARED_MEMORY_KEY)
-              } catch (err) {
-                console.error(`[computer-mcp] (${SHARED_MEMORY_KEY}) stopStream after close error:`, err)
+              if (!config.streamEnabled) {
+                try {
+                  await context.streamManager.stopStream(SHARED_MEMORY_KEY)
+                } catch (err) {
+                  console.error(`[computer-mcp] (${SHARED_MEMORY_KEY}) stopStream after close error:`, err)
+                }
               }
             }
           })
@@ -1527,10 +1500,12 @@ async function main() {
           console.error(`[computer-mcp] [${sessionId}] SSE server close error:`, err)
         }
         if (closed) {
-          try {
-            await context.streamManager.stopStream(SHARED_MEMORY_KEY)
-          } catch (err) {
-            console.error(`[computer-mcp] (${SHARED_MEMORY_KEY}) SSE stopStream error:`, err)
+          if (!config.streamEnabled) {
+            try {
+              await context.streamManager.stopStream(SHARED_MEMORY_KEY)
+            } catch (err) {
+              console.error(`[computer-mcp] (${SHARED_MEMORY_KEY}) SSE stopStream error:`, err)
+            }
           }
         }
       })
