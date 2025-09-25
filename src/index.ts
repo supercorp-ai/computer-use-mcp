@@ -11,7 +11,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import express, { type Application, type NextFunction, type Request, type Response as ExpressResponse } from 'express'
-import puppeteer, { executablePath, type Browser, type KeyInput, type MouseButton, type Page } from 'puppeteer'
+import puppeteer, { executablePath, type Browser, type Page } from 'puppeteer'
 import { hideBin } from 'yargs/helpers'
 import yargs from 'yargs'
 import { z } from 'zod'
@@ -216,46 +216,41 @@ type ComputerAction = z.infer<typeof actionSchema>
 // -----------------------------------------------------------------------------
 // Utility helpers
 // -----------------------------------------------------------------------------
-function mapMouseButton(button: 'left' | 'right' | 'wheel' | 'back' | 'forward'): MouseButton {
-  if (button === 'wheel') return 'middle'
-  return button
-}
-
-const KEY_ALIASES: Record<string, KeyInput> = {
-  ctrl: 'Control',
-  control: 'Control',
-  cmd: 'Meta',
-  command: 'Meta',
-  meta: 'Meta',
-  win: 'Meta',
-  option: 'Alt',
-  alt: 'Alt',
-  shift: 'Shift',
-  enter: 'Enter',
-  return: 'Enter',
+const XDOToolKeyAliases: Record<string, string> = {
+  ctrl: 'ctrl',
+  control: 'ctrl',
+  cmd: 'Super_L',
+  command: 'Super_L',
+  meta: 'Super_L',
+  win: 'Super_L',
+  option: 'alt',
+  alt: 'alt',
+  shift: 'shift',
+  enter: 'Return',
+  return: 'Return',
   esc: 'Escape',
   escape: 'Escape',
   tab: 'Tab',
-  space: ' ',
-  spacebar: ' ',
-  backspace: 'Backspace',
+  space: 'space',
+  spacebar: 'space',
+  backspace: 'BackSpace',
   del: 'Delete',
   delete: 'Delete',
-  pageup: 'PageUp',
-  pagedown: 'PageDown',
-  up: 'ArrowUp',
-  down: 'ArrowDown',
-  left: 'ArrowLeft',
-  right: 'ArrowRight',
+  pageup: 'Page_Up',
+  pagedown: 'Page_Down',
+  up: 'Up',
+  down: 'Down',
+  left: 'Left',
+  right: 'Right',
 }
 
-function normalizeKey(rawKey: string): KeyInput {
+function normalizeXdotoolKey(rawKey: string): string | null {
   const key = rawKey.trim()
-  if (!key) return ' ' as KeyInput
-  const aliasLookup = KEY_ALIASES[key.toLowerCase()]
+  if (!key) return null
+  const aliasLookup = XDOToolKeyAliases[key.toLowerCase()]
   if (aliasLookup) return aliasLookup
-  if (key.length === 1) return key as KeyInput
-  return key as KeyInput
+  if (key.length === 1) return key
+  return key
 }
 
 function stripTrailingSlash(url: string): string {
@@ -350,24 +345,25 @@ class ComputerSession {
   }
 
   private async moveSystemPointer(x: number, y: number) {
-    const tool = 'xdotool'
-    try {
-      await new Promise<void>((resolve, reject) => {
-        const proc = spawn(tool, ['mousemove', `${Math.round(x)}`, `${Math.round(y)}`], {
-          env: { ...process.env, DISPLAY: this.display.displayEnv },
-          stdio: ['ignore', 'ignore', 'pipe'],
-        })
-        let stderr = ''
-        proc.stderr?.on('data', data => { stderr += data.toString() })
-        proc.on('error', reject)
-        proc.on('exit', code => {
-          if (code === 0) resolve()
-          else reject(new Error(stderr.trim() || `pointer tool exited with code ${code}`))
-        })
+    await this.runXdotool(['mousemove', `${Math.round(x)}`, `${Math.round(y)}`])
+  }
+
+  private async runXdotool(args: string[]) {
+    return new Promise<void>((resolve, reject) => {
+      const proc = spawn('xdotool', args, {
+        env: { ...process.env, DISPLAY: this.display.displayEnv },
+        stdio: ['ignore', 'ignore', 'pipe'],
       })
-    } catch (err) {
-      console.warn(`[computer-mcp] (${this.memoryKey}) pointer tool failed:`, err)
-    }
+      let stderr = ''
+      proc.stderr?.on('data', data => { stderr += data.toString() })
+      proc.on('error', reject)
+      proc.on('exit', code => {
+        if (code === 0) resolve()
+        else reject(new Error(stderr.trim() || `xdotool exited with code ${code}`))
+      })
+    }).catch(err => {
+      console.warn(`[computer-mcp] (${this.memoryKey}) xdotool ${args.join(' ')} failed:`, err)
+    })
   }
 
   private normalizeVideoOptions(options: { fps: number; quality: number }): { fps: number; quality: number } {
@@ -585,67 +581,83 @@ class ComputerSession {
     } catch {}
   }
 
-  private async applyAction(page: Page, action: z.infer<typeof actionSchema>) {
+  private async applyAction(_page: Page, action: z.infer<typeof actionSchema>) {
     switch (action.type) {
       case 'click':
         await this.moveSystemPointer(action.x, action.y)
-        await page.mouse.click(action.x, action.y, { button: mapMouseButton(action.button) })
+        await this.runXdotool(['click', this.resolveMouseButton(action.button)])
         return
       case 'double_click':
         await this.moveSystemPointer(action.x, action.y)
-        await page.mouse.click(action.x, action.y, { button: 'left', clickCount: 2 })
+        await this.runXdotool(['click', '--repeat', '2', '--delay', '120', '1'])
         return
       case 'drag': {
         const [start, ...rest] = action.path
+        if (!start) return
         await this.moveSystemPointer(start.x, start.y)
-        await page.mouse.move(start.x, start.y)
-        await page.mouse.down()
+        await this.runXdotool(['mousedown', '1'])
         for (const point of rest) {
           await this.moveSystemPointer(point.x, point.y)
-          await page.mouse.move(point.x, point.y, { steps: 10 })
         }
-        await page.mouse.up()
+        await this.runXdotool(['mouseup', '1'])
         return
       }
       case 'keypress': {
-        const downKeys: KeyInput[] = []
-        const normalized = action.keys.map(normalizeKey)
-        const keyboard = page.keyboard
-        for (let i = 0; i < normalized.length; i += 1) {
-          const key = normalized[i]
-          const isLast = i === normalized.length - 1
-          if (isLast) {
-            await keyboard.press(key)
-          } else {
-            await keyboard.down(key)
-            downKeys.push(key)
-          }
-        }
-        for (const key of downKeys.reverse()) {
-          await keyboard.up(key)
-        }
+        const normalized = action.keys.map(normalizeXdotoolKey).filter(Boolean) as string[]
+        if (!normalized.length) return
+        await this.runXdotool(['key', '--clearmodifiers', normalized.join('+')])
         return
       }
       case 'move':
         await this.moveSystemPointer(action.x, action.y)
-        await page.mouse.move(action.x, action.y, { steps: 15 })
         return
       case 'screenshot':
         return
       case 'scroll':
         await this.moveSystemPointer(action.x, action.y)
-        await page.mouse.move(action.x, action.y, { steps: 5 })
-        await page.mouse.wheel({ deltaX: action.scroll_x, deltaY: action.scroll_y })
+        await this.performScroll(action.scroll_x, action.scroll_y)
         return
       case 'type':
-        await page.keyboard.type(action.text)
+        await this.runXdotool(['type', '--delay', '0', '--', action.text])
         return
-      case 'wait': {
+      case 'wait':
         await delay(1000)
         return
-      }
       default:
         throw new Error(`Unsupported action type: ${(action as { type: string }).type}`)
+    }
+  }
+
+  private resolveMouseButton(button: 'left' | 'right' | 'wheel' | 'back' | 'forward'): string {
+    switch (button) {
+      case 'left':
+        return '1'
+      case 'right':
+        return '3'
+      case 'wheel':
+        return '2'
+      case 'back':
+        return '8'
+      case 'forward':
+        return '9'
+      default:
+        return '1'
+    }
+  }
+
+  private async performScroll(scrollX: number, scrollY: number) {
+    const normalize = (value: number) => Math.min(100, Math.max(0, Math.round(Math.abs(value) / 120) || (value !== 0 ? 1 : 0)))
+    const verticalSteps = normalize(scrollY)
+    const horizontalSteps = normalize(scrollX)
+
+    if (verticalSteps > 0) {
+      const button = scrollY < 0 ? '4' : '5'
+      await this.runXdotool(['click', '--repeat', String(verticalSteps), '--delay', '20', button])
+    }
+
+    if (horizontalSteps > 0) {
+      const button = scrollX < 0 ? '6' : '7'
+      await this.runXdotool(['click', '--repeat', String(horizontalSteps), '--delay', '20', button])
     }
   }
 }
@@ -884,6 +896,7 @@ function createComputerUseServer(memoryKey: string, context: ServerContext): Mcp
       inputSchema: { action: actionSchema },
     },
     async ({ action }) => {
+      console.log(`[computer-mcp] (${memoryKey}) action -> ${humanActionSummary(action)}`)
       const session = sessionManager.get(memoryKey)
       const result = await session.perform(action)
       const base64Image = result.screenshot.buffer.toString('base64')
