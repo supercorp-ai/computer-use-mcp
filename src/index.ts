@@ -389,6 +389,7 @@ class ComputerSession {
       await this.stopHlsRecorder()
     }
 
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => {})
     await fs.mkdir(dir, { recursive: true })
 
     const bitrate = Math.max(300_000, Math.round((normalized.quality / 100) * 3_000_000))
@@ -537,7 +538,8 @@ class ComputerSession {
 
     const viewport = { width: this.config.displayWidth, height: this.config.displayHeight }
     const args = [
-      '--no-sandbox',
+      // '--no-sandbox',
+      '--test-type',
       '--disable-dev-shm-usage',
       '--disable-background-networking',
       '--disable-renderer-backgrounding',
@@ -552,6 +554,8 @@ class ComputerSession {
       '--no-default-browser-check',
       '--start-maximized',
       `--window-size=${viewport.width},${viewport.height}`,
+      '--disable-infobars',
+      '--disable-blink-features=AutomationControlled',
     ]
 
     if (this.config.headless) {
@@ -563,12 +567,18 @@ class ComputerSession {
       executablePath: this.config.chromePath,
       defaultViewport: viewport,
       args,
+      ignoreDefaultArgs: ['--enable-automation'],
       env: { ...process.env, DISPLAY: this.display.displayEnv },
     })
 
     this.browser = browser
     const pages = await browser.pages()
     this.page = pages.length ? pages[0] : await browser.newPage()
+    await this.page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', {
+        get: () => undefined,
+      })
+    })
     await this.page.setViewport({ ...viewport, deviceScaleFactor: 1 })
     const targetUrl = this.config.defaultUrl?.trim() || this.config.blankPageUrl
     try {
@@ -663,45 +673,43 @@ class ComputerSession {
 }
 
 class ComputerSessionManager {
-  private sessions = new Map<string, ComputerSession>()
+  private session: ComputerSession | undefined
   private nextDisplay: number
 
   constructor(private readonly config: Config) {
     this.nextDisplay = config.displayBase
   }
 
-  private allocateDisplayNumber(): number {
-    return this.nextDisplay++
+  private createSession(): ComputerSession {
+    return new ComputerSession('default', this.config, this.nextDisplay++)
   }
 
-  get(memoryKey: string): ComputerSession {
-    let session = this.sessions.get(memoryKey)
-    if (!session) {
-      session = new ComputerSession(memoryKey, this.config, this.allocateDisplayNumber())
-      this.sessions.set(memoryKey, session)
+  get(): ComputerSession {
+    if (!this.session) {
+      this.session = this.createSession()
     }
-    return session
+    return this.session
   }
 
-  peek(memoryKey: string): ComputerSession | undefined {
-    return this.sessions.get(memoryKey)
+  peek(): ComputerSession | undefined {
+    return this.session
   }
 
-  async release(memoryKey: string) {
-    const session = this.sessions.get(memoryKey)
-    if (!session) return
-    this.sessions.delete(memoryKey)
-    try {
-      await session.close()
-    } catch (err) {
-      console.error(`[computer-mcp] (${memoryKey}) failed to close session:`, err)
-    }
+  async release(): Promise<void> {
+    if (!this.session) return
+    const current = this.session
+    this.session = undefined
+    await current.close().catch(err => {
+      console.error('[computer-mcp] failed to close session:', err)
+    })
   }
 
   async closeAll() {
-    const sessions = Array.from(this.sessions.values())
-    this.sessions.clear()
-    await Promise.allSettled(sessions.map(session => session.close()))
+    if (!this.session) return
+    await this.session.close().catch(err => {
+      console.error('[computer-mcp] failed to close session:', err)
+    })
+    this.session = undefined
   }
 }
 
@@ -710,7 +718,6 @@ class ComputerSessionManager {
 // -----------------------------------------------------------------------------
 interface StreamRequest {
   streamId: string
-  memoryKey: string
   fps: number
   quality: number
   createdAt: number
@@ -719,8 +726,7 @@ interface StreamRequest {
 }
 
 class StreamManager {
-  private streamsById = new Map<string, StreamRequest>()
-  private streamsByMemory = new Map<string, StreamRequest>()
+  private current?: StreamRequest
   private readonly baseUrlFactory: () => string
   private readonly hlsRoot: string
 
@@ -737,8 +743,8 @@ class StreamManager {
   attachRoutes(app: Application) {
     app.get(`${this.config.streamPath}/:id/index.m3u8`, async (req: Request, res: ExpressResponse) => {
       try {
-        const stream = this.streamsById.get(req.params.id)
-        if (!stream || stream.closed) {
+        const stream = this.current
+        if (!stream || stream.closed || req.params.id !== stream.streamId) {
           res.status(404).json({ error: 'Stream not found' })
           return
         }
@@ -755,8 +761,8 @@ class StreamManager {
 
     app.get(`${this.config.streamPath}/:id/:segment`, async (req: Request, res: ExpressResponse) => {
       try {
-        const stream = this.streamsById.get(req.params.id)
-        if (!stream || stream.closed) {
+        const stream = this.current
+        if (!stream || stream.closed || req.params.id !== stream.streamId) {
           res.status(404).json({ error: 'Stream not found' })
           return
         }
@@ -777,67 +783,62 @@ class StreamManager {
     })
   }
 
-  async startStream(memoryKey: string, options?: { fps?: number; quality?: number }): Promise<{ streamId: string; url: string; created: boolean }> {
-    const existing = this.streamsByMemory.get(memoryKey)
+  async startStream(options?: { fps?: number; quality?: number }): Promise<{ streamId: string; url: string; created: boolean }> {
+    const existing = this.current
     if (existing && !existing.closed) {
-      if (options?.fps) existing.fps = options.fps
-      if (options?.quality) existing.quality = options.quality
-      return { streamId: existing.streamId, url: `${this.baseUrlFactory()}${this.config.streamPath}/${existing.streamId}/index.m3u8`, created: false }
+      if (options?.fps !== undefined) existing.fps = options.fps
+      if (options?.quality !== undefined) existing.quality = options.quality
+      return { streamId: existing.streamId, url: this.streamUrl(existing.streamId), created: false }
     }
-    const streamId = randomUUID()
+
+    const streamId = 'default'
     const dir = path.join(this.hlsRoot, streamId)
-    const session = this.sessionManager.get(memoryKey)
+    const session = this.sessionManager.get()
     await session.ensureHlsRecorder(dir, { fps: options?.fps ?? this.config.streamDefaults.fps, quality: options?.quality ?? this.config.streamDefaults.quality })
+
     const stream: StreamRequest = {
       streamId,
-      memoryKey,
       fps: options?.fps ?? this.config.streamDefaults.fps,
       quality: options?.quality ?? this.config.streamDefaults.quality,
       createdAt: Date.now(),
       dir,
       closed: false,
     }
-    this.streamsById.set(streamId, stream)
-    this.streamsByMemory.set(memoryKey, stream)
-    return { streamId, url: `${this.baseUrlFactory()}${this.config.streamPath}/${streamId}/index.m3u8`, created: true }
+    this.current = stream
+    return { streamId, url: this.streamUrl(streamId), created: true }
   }
 
-  async getStream(memoryKey: string, options?: { fps?: number; quality?: number }): Promise<{ streamId: string; url: string; created: boolean }> {
-    const existing = this.streamsByMemory.get(memoryKey)
+  async getStream(options?: { fps?: number; quality?: number }): Promise<{ streamId: string; url: string; created: boolean }> {
+    const existing = this.current
     if (existing && !existing.closed) {
       if (options?.fps !== undefined || options?.quality !== undefined) {
-        return this.startStream(memoryKey, options)
+        return this.startStream(options)
       }
-      return { streamId: existing.streamId, url: `${this.baseUrlFactory()}${this.config.streamPath}/${existing.streamId}/index.m3u8`, created: false }
+      return { streamId: existing.streamId, url: this.streamUrl(existing.streamId), created: false }
     }
-    return this.startStream(memoryKey, options)
+    return this.startStream(options)
   }
 
-  getActiveStreamSummary(memoryKey?: string): { streamId: string; url: string } | undefined {
-    if (memoryKey) {
-      const stream = this.streamsByMemory.get(memoryKey)
-      if (stream && !stream.closed) {
-        return { streamId: stream.streamId, url: `${this.baseUrlFactory()}${this.config.streamPath}/${stream.streamId}/index.m3u8` }
-      }
-      return undefined
-    }
-    for (const stream of this.streamsByMemory.values()) {
-      if (!stream.closed) {
-        return { streamId: stream.streamId, url: `${this.baseUrlFactory()}${this.config.streamPath}/${stream.streamId}/index.m3u8` }
-      }
+  getActiveStreamSummary(): { streamId: string; url: string } | undefined {
+    const stream = this.current
+    if (stream && !stream.closed) {
+      return { streamId: stream.streamId, url: this.streamUrl(stream.streamId) }
     }
     return undefined
   }
 
-  async stopStream(memoryKey: string, streamId?: string): Promise<{ stopped: boolean; streamId?: string }> {
-    const stream = streamId ? this.streamsById.get(streamId) : this.streamsByMemory.get(memoryKey)
-    if (!stream) {
+  async stopStream(streamId?: string): Promise<{ stopped: boolean; streamId?: string }> {
+    const stream = this.current
+    if (!stream || stream.closed) {
+      return { stopped: false }
+    }
+    if (streamId && streamId !== stream.streamId) {
       return { stopped: false }
     }
     stream.closed = true
-    this.streamsById.delete(stream.streamId)
-    this.streamsByMemory.delete(stream.memoryKey)
-    const session = this.sessionManager.peek(stream.memoryKey)
+    this.current = undefined
+
+    const session = this.sessionManager.peek()
     if (session) {
       await session.stopHlsRecorder()
     }
@@ -848,10 +849,11 @@ class StreamManager {
   }
 
   async stopAll() {
-    const streams = Array.from(this.streamsById.values())
-    await Promise.allSettled(streams.map(stream => this.stopStream(stream.memoryKey, stream.streamId)))
-    this.streamsById.clear()
-    this.streamsByMemory.clear()
+    await this.stopStream()
+  }
+
+  private streamUrl(streamId: string): string {
+    return `${this.baseUrlFactory()}${this.config.streamPath}/${streamId}/index.m3u8`
   }
 }
 
@@ -882,10 +884,10 @@ function buildStreamResult(payload: Record<string, unknown>) {
   }
 }
 
-function createComputerUseServer(memoryKey: string, context: ServerContext): McpServer {
+function createComputerUseServer(context: ServerContext): McpServer {
   const { config, sessionManager, streamManager } = context
   const server = new McpServer({
-    name: `Computer MCP Server (key=${memoryKey})`,
+    name: 'Computer MCP Server',
     version: '1.0.0',
   })
 
@@ -896,8 +898,8 @@ function createComputerUseServer(memoryKey: string, context: ServerContext): Mcp
       inputSchema: { action: actionSchema },
     },
     async ({ action }) => {
-      console.log(`[computer-mcp] (${memoryKey}) action -> ${humanActionSummary(action)}`)
-      const session = sessionManager.get(memoryKey)
+      console.log(`[computer-mcp] action -> ${humanActionSummary(action)}`)
+      const session = sessionManager.get()
       const result = await session.perform(action)
       const base64Image = result.screenshot.buffer.toString('base64')
       return buildComputerCallResult(action, base64Image)
@@ -915,7 +917,7 @@ function createComputerUseServer(memoryKey: string, context: ServerContext): Mcp
         comment: z.string().optional(),
       },
       async (args) => {
-        const stream = await streamManager.startStream(memoryKey, { fps: args.fps, quality: args.quality })
+        const stream = await streamManager.startStream({ fps: args.fps, quality: args.quality })
         return buildStreamResult({
           type: 'computer_stream_started',
           stream_id: stream.streamId,
@@ -935,7 +937,7 @@ function createComputerUseServer(memoryKey: string, context: ServerContext): Mcp
         comment: z.string().optional(),
       },
       async (args) => {
-        const stream = await streamManager.getStream(memoryKey, { fps: args.fps, quality: args.quality })
+        const stream = await streamManager.getStream({ fps: args.fps, quality: args.quality })
         return buildStreamResult({
           type: 'computer_stream_ready',
           stream_id: stream.streamId,
@@ -954,7 +956,7 @@ function createComputerUseServer(memoryKey: string, context: ServerContext): Mcp
         comment: z.string().optional(),
       },
       async (args) => {
-        const stopped = await streamManager.stopStream(memoryKey, args.streamId)
+        const stopped = await streamManager.stopStream(args.streamId)
         return buildStreamResult({
           type: 'computer_stream_stopped',
           stopped: stopped.stopped,
@@ -989,9 +991,9 @@ function logHttpEvent(req: Request, message: string, extra?: Record<string, unkn
   console.log(`[computer-mcp] [http] ${method} ${path} ${message}`, payload)
 }
 
-function registerPreviewPage(app: Application, streams: StreamManager, defaultMemoryKey: string, routePath: string) {
-  app.get(routePath, (req: Request, res: ExpressResponse) => {
-    const defaultStream = streams.getActiveStreamSummary(defaultMemoryKey)
+function registerPreviewPage(app: Application, streams: StreamManager, routePath: string) {
+  app.get(routePath, (_req: Request, res: ExpressResponse) => {
+    const defaultStream = streams.getActiveStreamSummary()
     const initialUrl = defaultStream?.url || ''
     const html = `<!doctype html>
 <html lang="en">
@@ -1106,7 +1108,7 @@ function registerPreviewPage(app: Application, streams: StreamManager, defaultMe
 
 function registerBlankPage(app: Application) {
   app.get('/blank', (_req: Request, res: ExpressResponse) => {
-    res.type('html').send('<!doctype html><html><head><meta charset="utf-8" /><title>Blank</title><style>body{margin:0;background:#0e1014;color:#f0f3f7;font-family:system-ui,Helvetica,Arial,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;}span{opacity:0.2;letter-spacing:0.3em;text-transform:uppercase;font-size:12px;}</style></head><body><span>Ready</span></body></html>')
+    res.type('html').send('<!doctype html><html><head><meta charset="utf-8" /><title>Blank</title><style>body{margin:0;background:#0e1014;color:#f0f3f7;font-family:system-ui,Helvetica,Arial,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;}span{opacity:0.2;letter-spacing:0.3em;text-transform:uppercase;font-size:12px;}</style></head><body><span>Superstream</span></body></html>')
   })
 }
 
@@ -1114,14 +1116,13 @@ function registerBlankPage(app: Application) {
 // Entrypoint
 // -----------------------------------------------------------------------------
 async function main() {
-  const SHARED_MEMORY_KEY = 'shared'
   const argv = yargs(hideBin(process.argv))
     .option('port', { type: 'number', default: 8000 })
     .option('transport', { type: 'string', choices: ['sse', 'stdio', 'http'], default: 'http' })
     .option('displayWidth', { type: 'number', default: 1280 })
     .option('displayHeight', { type: 'number', default: 720 })
     .option('environment', { type: 'string', default: 'browser' })
-    .option('headless', { type: 'boolean', default: true })
+    .option('headless', { type: 'boolean', default: false })
     .option('defaultUrl', { type: 'string' })
     .option('toolsPrefix', { type: 'string', default: 'computer_' })
     .option('publicBaseUrl', { type: 'string' })
@@ -1211,11 +1212,11 @@ async function main() {
 
   const context: ServerContext = { config, sessionManager, streamManager }
 
-  const createServer = () => createComputerUseServer(SHARED_MEMORY_KEY, context)
+  const createServer = () => createComputerUseServer(context)
 
   if (streamAutoEnabled) {
     void streamManager
-      .startStream(SHARED_MEMORY_KEY)
+      .startStream()
       .then(stream => {
         const location = stream.url ?? `${stream.streamId}`
         console.log(`[computer-mcp] default stream ready (${location})`)
@@ -1269,7 +1270,7 @@ async function main() {
     }
     registerBlankPage(app)
     if (config.previewPath) {
-      registerPreviewPage(app, streamManager, SHARED_MEMORY_KEY, config.previewPath)
+      registerPreviewPage(app, streamManager, config.previewPath)
     }
     httpServer = app.listen(config.port, () => {
       console.log(`[computer-mcp] Serving media endpoints on port ${config.port}`)
@@ -1292,7 +1293,7 @@ async function main() {
   }
   registerBlankPage(app)
   if (config.previewPath) {
-    registerPreviewPage(app, streamManager, SHARED_MEMORY_KEY, config.previewPath)
+    registerPreviewPage(app, streamManager, config.previewPath)
   }
 
   if (config.transport === 'http') {
@@ -1354,9 +1355,9 @@ async function main() {
             if (entry) {
               if (!config.streamEnabled) {
                 try {
-                  await context.streamManager.stopStream(SHARED_MEMORY_KEY)
+                  await context.streamManager.stopStream()
                 } catch (err) {
-                  console.error(`[computer-mcp] (${SHARED_MEMORY_KEY}) stopStream after close error:`, err)
+                  console.error('[computer-mcp] stopStream after close error:', err)
                 }
               }
             }
@@ -1364,7 +1365,7 @@ async function main() {
         }
 
         await server.connect(transport)
-        logHttpEvent(req, 'established new session', { memoryKey: SHARED_MEMORY_KEY })
+        logHttpEvent(req, 'established new session', {})
         await transport.handleRequest(req, res)
       } catch (err) {
         logHttpEvent(req, 'POST / handler failed', { error: err instanceof Error ? err.message : String(err) })
@@ -1515,9 +1516,9 @@ async function main() {
         if (closed) {
           if (!config.streamEnabled) {
             try {
-              await context.streamManager.stopStream(SHARED_MEMORY_KEY)
+              await context.streamManager.stopStream()
             } catch (err) {
-              console.error(`[computer-mcp] (${SHARED_MEMORY_KEY}) SSE stopStream error:`, err)
+              console.error('[computer-mcp] SSE stopStream error:', err)
             }
           }
         }

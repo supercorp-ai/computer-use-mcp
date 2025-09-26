@@ -143,8 +143,8 @@ To navigate, send a keypress to focus the address bar (`{"action":{"type":"keypr
 
 Regardless of transport mode, the server binds HTTP routes for media:
 
-- `GET {streamPath}/:streamId/index.m3u8` – Live HLS playlist when streaming is enabled.
-- `GET {previewPath}` – Lightweight HTML page that shows the shared HLS feed (available when `--previewPath` is supplied).
+- `GET {streamPath}/default/index.m3u8` – Playlist for the shared HLS feed (adjusts with `--streamPath`).
+- `GET {previewPath}` – Lightweight HTML page that shows the shared feed (available when `--previewPath` is supplied).
 - `GET /blank` – Minimal capture-ready page used as the initial browser target.
 - `GET /healthz` – Basic liveness probe.
 
