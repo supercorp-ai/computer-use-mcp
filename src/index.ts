@@ -394,19 +394,32 @@ class ComputerSession {
     }
   }
 
-  async ensureRtspPublisher(rtspUrl: string, opts: { fps: number; bitrateK: number; audioSource: 'none'|'anullsrc'|'pulse' }) {
+  async ensureRtspPublisher(
+    rtspUrl: string,
+    opts: { fps: number; bitrateK: number; audioSource: 'none' | 'anullsrc' | 'pulse' }
+  ) {
     await this.ensureEnvironment()
-    if (this.rtsp &&
+    if (
+      this.rtsp &&
       this.rtsp.rtspUrl === rtspUrl &&
       this.rtsp.opts.fps === opts.fps &&
       this.rtsp.opts.bitrateK === opts.bitrateK &&
-      this.rtsp.opts.audioSource === opts.audioSource) {
+      this.rtsp.opts.audioSource === opts.audioSource
+    ) {
       return
     }
     await this.stopRtspPublisher().catch(() => {})
 
     const inputTarget = `${this.display.displayEnv}+0,0`
-    const vIn = ['-f','x11grab','-video_size',`${this.config.displayWidth}x${this.config.displayHeight}`,'-i', inputTarget, '-draw_mouse','1']
+
+    // NOTE: only change is the position of -draw_mouse (must be before -i)
+    const vIn = [
+      '-f', 'x11grab',
+      '-video_size', `${this.config.displayWidth}x${this.config.displayHeight}`,
+      '-draw_mouse', '1',
+      '-i', inputTarget,
+    ]
+
     const aIn =
       opts.audioSource === 'pulse'    ? ['-f','pulse','-i','default'] :
       opts.audioSource === 'anullsrc' ? ['-f','lavfi','-i','anullsrc=r=48000:cl=stereo'] :
@@ -608,7 +621,7 @@ class ComputerSession {
 
     const viewport = { width: this.config.displayWidth, height: this.config.displayHeight }
     const args = [
-      // '--no-sandbox',
+      '--no-sandbox',
       '--test-type',
       '--disable-dev-shm-usage',
       '--disable-background-networking',
