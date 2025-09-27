@@ -25,6 +25,8 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 // -----------------------------------------------------------------------------
 // Configuration Types
 // -----------------------------------------------------------------------------
+type ImageOutputFormat = 'mcp-spec' | 'openai-responses-api'
+
 interface Config {
   port: number
   transport: 'sse' | 'stdio' | 'http'
@@ -46,6 +48,7 @@ interface Config {
   displayBase: number
   pointerTool?: string
   blankPageUrl: string
+  imageOutputFormat: ImageOutputFormat
 }
 
 interface ActionResult {
@@ -301,9 +304,6 @@ function humanActionSummary(action: z.infer<typeof actionSchema>): string {
   throw new Error(`Unsupported action type: ${(exhaustive as { type: string }).type}`)
 }
 
-// -----------------------------------------------------------------------------
-// Screenshot storage (in-memory with TTL) so we can serve via HTTP
-// -----------------------------------------------------------------------------
 // -----------------------------------------------------------------------------
 // Computer session management (Puppeteer-backed virtual browser)
 // -----------------------------------------------------------------------------
@@ -656,9 +656,9 @@ class ComputerSession {
   }
 
   private async performScroll(scrollX: number, scrollY: number) {
-    const normalize = (value: number) => Math.min(100, Math.max(0, Math.round(Math.abs(value) / 120) || (value !== 0 ? 1 : 0)))
-    const verticalSteps = normalize(scrollY)
-    const horizontalSteps = normalize(scrollX)
+    const normalize = (value: number) => Math.min(100, Math.max(0, Math.round(Math.abs(value)) || (value !== 0 ? 1 : 0)))
+    const verticalSteps = normalize(scrollY / 120)
+    const horizontalSteps = normalize(scrollX / 120)
 
     if (verticalSteps > 0) {
       const button = scrollY < 0 ? '4' : '5'
@@ -714,7 +714,7 @@ class ComputerSessionManager {
 }
 
 // -----------------------------------------------------------------------------
-// Stream manager (MJPEG over HTTP)
+// Stream manager (HLS over HTTP)
 // -----------------------------------------------------------------------------
 interface StreamRequest {
   streamId: string
@@ -860,13 +860,32 @@ class StreamManager {
 // -----------------------------------------------------------------------------
 // MCP Server registration
 // -----------------------------------------------------------------------------
-function buildComputerCallResult(_action: ComputerAction, base64Image: string) {
+function buildComputerCallResult(
+  _action: ComputerAction,
+  base64Image: string,
+  mimeType: string,
+  format: ImageOutputFormat
+) {
+  if (format === 'openai-responses-api') {
+    // OpenAI Responses API: input_image object
+    return {
+      content: [
+        {
+          type: 'input_image' as const,
+          image_url: `data:${mimeType};base64,${base64Image}`,
+          // detail/file_id omitted intentionally
+        },
+      ],
+    }
+  }
+
+  // Default MCP spec content
   return {
     content: [
       {
         type: 'image' as const,
         data: base64Image,
-        mimeType: 'image/png',
+        mimeType: mimeType || 'image/png',
       },
     ],
   }
@@ -902,7 +921,7 @@ function createComputerUseServer(context: ServerContext): McpServer {
       const session = sessionManager.get()
       const result = await session.perform(action)
       const base64Image = result.screenshot.buffer.toString('base64')
-      return buildComputerCallResult(action, base64Image)
+      return buildComputerCallResult(action, base64Image, result.screenshot.contentType, config.imageOutputFormat)
     }
   )
 
@@ -1108,7 +1127,9 @@ function registerPreviewPage(app: Application, streams: StreamManager, routePath
 
 function registerBlankPage(app: Application) {
   app.get('/blank', (_req: Request, res: ExpressResponse) => {
-    res.type('html').send('<!doctype html><html><head><meta charset="utf-8" /><title>Blank</title><style>body{margin:0;background:#0e1014;color:#f0f3f7;font-family:system-ui,Helvetica,Arial,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;}span{opacity:0.2;letter-spacing:0.3em;text-transform:uppercase;font-size:12px;}</style></head><body><span>Superstream</span></body></html>')
+    res
+      .type('html')
+      .send('<!doctype html><html><head><meta charset="utf-8" /><title>Blank</title><style>body{margin:0;background:#0e1014;color:#f0f3f7;font-family:system-ui,Helvetica,Arial,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;}span{opacity:0.2;letter-spacing:0.3em;text-transform:uppercase;font-size:12px;}</style></head><body><span>Superstream</span></body></html>')
   })
 }
 
@@ -1132,13 +1153,19 @@ async function main() {
     .option('stream', {
       type: 'array',
       string: true,
-      describe: 'Enable streaming features (e.g. --stream auto --stream functions).'
+      describe: 'Enable streaming features (e.g. --stream auto --stream functions).',
     })
     .option('previewPath', { type: 'string', describe: 'Mount an HTML preview page at the given path (requires --stream).' })
     .option('chromePath', { type: 'string', describe: 'Path to Chrome/Chromium executable launched by Puppeteer (default: bundled binary).' })
     .option('ffmpegPath', { type: 'string', describe: 'Path to ffmpeg binary used for display capture (default: ffmpeg).' })
     .option('xvfbPath', { type: 'string', describe: 'Path to Xvfb binary used for virtual display (default: Xvfb).' })
     .option('displayStart', { type: 'number', default: 90, describe: 'Base X display number for virtual browser sessions.' })
+    .option('imageOutputFormat', {
+      type: 'string',
+      choices: ['mcp-spec', 'openai-responses-api'],
+      default: 'mcp-spec',
+      describe: 'Format of screenshot in tool result content.',
+    })
     .help()
     .parseSync()
 
@@ -1147,7 +1174,7 @@ async function main() {
     process.exit(1)
   }
 
-  const streamModeInputs = (argv.stream ?? []).map(mode => mode.toLowerCase())
+  const streamModeInputs = (argv.stream ?? []).map((mode) => mode.toLowerCase())
   const validStreamModes = new Set(['auto', 'functions'])
   for (const mode of streamModeInputs) {
     if (!validStreamModes.has(mode)) {
@@ -1171,9 +1198,7 @@ async function main() {
   const blankPageUrl = `${internalOrigin}/blank`
   let chromeExecutable: string | undefined
   try {
-    chromeExecutable = argv.chromePath && argv.chromePath.trim()
-      ? argv.chromePath.trim()
-      : executablePath()
+    chromeExecutable = argv.chromePath && argv.chromePath.trim() ? argv.chromePath.trim() : executablePath()
   } catch (err) {
     console.warn('[computer-mcp] Unable to determine Chrome executable path automatically:', err)
     chromeExecutable = argv.chromePath?.trim()
@@ -1204,6 +1229,7 @@ async function main() {
     xvfbPath: argv.xvfbPath && argv.xvfbPath.trim() ? argv.xvfbPath.trim() : 'Xvfb',
     displayBase: Math.max(1, Math.min(60000, argv.displayStart ?? 90)),
     blankPageUrl,
+    imageOutputFormat: (argv.imageOutputFormat as ImageOutputFormat) ?? 'mcp-spec',
   }
 
   const baseUrl = resolveBaseUrl(config)
@@ -1217,11 +1243,11 @@ async function main() {
   if (streamAutoEnabled) {
     void streamManager
       .startStream()
-      .then(stream => {
+      .then((stream) => {
         const location = stream.url ?? `${stream.streamId}`
         console.log(`[computer-mcp] default stream ready (${location})`)
       })
-      .catch(err => {
+      .catch((err) => {
         console.error('[computer-mcp] failed to start default stream:', err)
       })
   }
@@ -1241,7 +1267,7 @@ async function main() {
           socket.destroy()
         } catch {}
       }
-      await new Promise<void>(resolve => httpServer?.close(() => resolve()))
+      await new Promise<void>((resolve) => httpServer?.close(() => resolve()))
       sockets.clear()
       httpServer = undefined
     }
@@ -1285,7 +1311,7 @@ async function main() {
   const app = express()
 
   // Attach shared routes first
-  app.get('/healthz', (_req, res) => {
+  app.get('/healthz', (_req: Request, res: ExpressResponse) => {
     res.json({ ok: true })
   })
   if (config.streamEnabled || config.previewPath) {
@@ -1344,7 +1370,7 @@ async function main() {
           const entry = sid ? sessions.get(sid) : undefined
           if (sid && entry) {
             sessions.delete(sid)
-            console.log(`[computer-mcp] [${sid}] Streamable transport closed`)
+            console.log(`[computer-mcp] [${sid ?? 'unknown'}] Streamable transport closed`)
           }
           setImmediate(async () => {
             try {
@@ -1504,7 +1530,7 @@ async function main() {
     console.log(`[computer-mcp] [${sessionId}] SSE connected (shared)`)
 
     transport.onclose = async () => {
-      const index = sessions.findIndex(s => s.transport === transport)
+      const index = sessions.findIndex((s) => s.transport === transport)
       const closed = index >= 0 ? sessions[index] : undefined
       if (index >= 0) sessions.splice(index, 1)
       setImmediate(async () => {
@@ -1531,7 +1557,7 @@ async function main() {
     }
 
     req.on('close', () => {
-      sessions = sessions.filter(s => s.transport !== transport)
+      sessions = sessions.filter((s) => s.transport !== transport)
     })
   })
 
@@ -1541,7 +1567,7 @@ async function main() {
       res.status(400).send({ error: 'Missing sessionId' })
       return
     }
-    const target = sessions.find(s => s.sessionId === sessionId)
+    const target = sessions.find((s) => s.sessionId === sessionId)
     if (!target) {
       res.status(404).send({ error: 'No active session' })
       return
@@ -1563,7 +1589,7 @@ async function main() {
   })
 }
 
-main().catch(err => {
+main().catch((err) => {
   console.error('[computer-mcp] Fatal error:', err)
   process.exit(1)
 })
