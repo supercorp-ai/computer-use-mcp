@@ -639,6 +639,7 @@ class ComputerSession {
       `--window-size=${viewport.width},${viewport.height}`,
       '--disable-infobars',
       '--disable-blink-features=AutomationControlled',
+      '--disable-search-engine-choice-screen',
     ]
 
     if (this.config.headless) {
