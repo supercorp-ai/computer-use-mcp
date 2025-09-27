@@ -869,13 +869,21 @@ function buildComputerCallResult(
   if (format === 'openai-responses-api') {
     // OpenAI Responses API: input_image object
     return {
+      structuredContent: {
+        content: [
+          {
+            type: 'input_image' as const,
+            image_url: `data:${mimeType};base64,${base64Image}`,
+            // detail/file_id omitted intentionally
+          },
+        ],
+      },
       content: [
         {
-          type: 'input_image' as const,
-          image_url: `data:${mimeType};base64,${base64Image}`,
-          // detail/file_id omitted intentionally
+          type: 'text' as const,
+          text: 'Here’s a screenshot.',
         },
-      ] as any
+      ],
     }
   }
 
