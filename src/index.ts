@@ -26,6 +26,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 // Configuration Types
 // -----------------------------------------------------------------------------
 type ImageOutputFormat = 'mcp-spec' | 'openai-responses-api'
+type StreamTarget = 'local' | 'mediamtx'
 
 interface Config {
   port: number
@@ -41,6 +42,12 @@ interface Config {
   streamDefaults: { fps: number; quality: number }
   streamEnabled: boolean
   streamFunctions: boolean
+  streamTarget: StreamTarget;               // 'local' | 'mediamtx'
+  mtxRtspUrl?: string;                      // e.g. rtsp://mediamtx:8554/computer_use
+  mtxHlsUrl?: string;                       // optional override play URL (https://.../index.m3u8)
+  mtxFps: number;                           // e.g. 25
+  mtxBitrateK: number;                      // e.g. 2500
+  audioSource: 'none' | 'anullsrc' | 'pulse'; // how to provide audio
   previewPath?: string
   chromePath?: string
   ffmpegPath: string
@@ -60,6 +67,12 @@ type HlsRecorder = {
   process: ChildProcess
   dir: string
   options: { fps: number; quality: number }
+}
+
+type RtspPublisher = {
+  process: ChildProcess
+  rtspUrl: string
+  opts: { fps: number; bitrateK: number; audioSource: 'none'|'anullsrc'|'pulse' }
 }
 
 interface ServerContext {
@@ -313,6 +326,7 @@ class ComputerSession {
   private queue: Promise<unknown> = Promise.resolve()
   private hlsRecorder?: HlsRecorder
   private readonly display: VirtualDisplay
+  private rtsp?: RtspPublisher
 
   constructor(private readonly memoryKey: string, private readonly config: Config, displayNumber: number) {
     this.display = new VirtualDisplay(displayNumber, config.displayWidth, config.displayHeight, config.xvfbPath)
@@ -332,6 +346,7 @@ class ComputerSession {
   async close() {
     await this.enqueue(async () => {
       await this.stopHlsRecorder()
+      await this.stopRtspPublisher()
       try {
         await this.page?.close()
       } catch {}
@@ -377,6 +392,61 @@ class ComputerSession {
     if (!this.browser || !this.page || this.page.isClosed()) {
       await this.launchBrowser()
     }
+  }
+
+  async ensureRtspPublisher(rtspUrl: string, opts: { fps: number; bitrateK: number; audioSource: 'none'|'anullsrc'|'pulse' }) {
+    await this.ensureEnvironment()
+    if (this.rtsp &&
+      this.rtsp.rtspUrl === rtspUrl &&
+      this.rtsp.opts.fps === opts.fps &&
+      this.rtsp.opts.bitrateK === opts.bitrateK &&
+      this.rtsp.opts.audioSource === opts.audioSource) {
+      return
+    }
+    await this.stopRtspPublisher().catch(() => {})
+
+    const inputTarget = `${this.display.displayEnv}+0,0`
+    const vIn = ['-f','x11grab','-video_size',`${this.config.displayWidth}x${this.config.displayHeight}`,'-i', inputTarget, '-draw_mouse','1']
+    const aIn =
+      opts.audioSource === 'pulse'    ? ['-f','pulse','-i','default'] :
+      opts.audioSource === 'anullsrc' ? ['-f','lavfi','-i','anullsrc=r=48000:cl=stereo'] :
+      []
+
+    const ffArgs = [
+      '-loglevel','error','-nostdin',
+      ...vIn, ...aIn,
+      '-c:v','libx264','-preset','veryfast','-tune','zerolatency',
+      '-profile:v','baseline','-level','3.1','-pix_fmt','yuv420p',
+      '-r', String(opts.fps),
+      '-g', String(opts.fps), '-keyint_min', String(opts.fps), '-sc_threshold','0',
+      '-b:v', `${opts.bitrateK}k`,
+      '-maxrate', `${Math.round(opts.bitrateK*1.2)}k`,
+      '-bufsize', `${Math.round(opts.bitrateK*0.6)}k`,
+      ...(aIn.length ? ['-c:a','aac','-b:a','128k','-ar','48000','-ac','2'] : []),
+      '-fflags','+genpts',
+      '-f','rtsp','-rtsp_transport','tcp', rtspUrl,
+    ]
+
+    const env = { ...process.env, DISPLAY: this.display.displayEnv }
+    const proc = spawn(this.config.ffmpegPath, ffArgs, { env, stdio: ['ignore','pipe','pipe'] })
+    proc.stderr?.on('data', d => {
+      const t = d.toString().trim()
+      if (t) console.debug(`[computer-mcp] ffmpeg (rtsp) ${t}`)
+    })
+    proc.on('exit', (code, signal) => {
+      console.error(`[computer-mcp] ffmpeg (rtsp) exited (code=${code ?? 'n/a'}, signal=${signal ?? 'n/a'})`)
+      if (this.rtsp?.process === proc) this.rtsp = undefined
+    })
+
+    this.rtsp = { process: proc, rtspUrl, opts }
+  }
+
+  async stopRtspPublisher() {
+    const pub = this.rtsp
+    if (!pub) return
+    this.rtsp = undefined
+    try { pub.process.kill('SIGTERM') } catch {}
+    try { await once(pub.process, 'exit') } catch {}
   }
 
   async ensureHlsRecorder(dir: string, options: { fps: number; quality: number }): Promise<void> {
@@ -726,7 +796,7 @@ interface StreamRequest {
 }
 
 class StreamManager {
-  private current?: StreamRequest
+  private current?: StreamRequest         // used only for local HLS
   private readonly baseUrlFactory: () => string
   private readonly hlsRoot: string
 
@@ -741,6 +811,7 @@ class StreamManager {
   }
 
   attachRoutes(app: Application) {
+    // Routes are only useful for local HLS. Keeping them doesn’t hurt for mediamtx (they’ll just 404).
     app.get(`${this.config.streamPath}/:id/index.m3u8`, async (req: Request, res: ExpressResponse) => {
       try {
         const stream = this.current
@@ -783,7 +854,50 @@ class StreamManager {
     })
   }
 
-  async startStream(options?: { fps?: number; quality?: number }): Promise<{ streamId: string; url: string; created: boolean }> {
+  // ---------- public API ----------
+  async startStream(options?: { fps?: number; quality?: number }) {
+    return this.config.streamTarget === 'mediamtx'
+      ? this.startMediaMtxHls()
+      : this.startLocalHls(options)
+  }
+
+  async getStream(options?: { fps?: number; quality?: number }) {
+    if (this.config.streamTarget === 'mediamtx') {
+      return this.startMediaMtxHls() // idempotent: re-ensures publisher, returns URL
+    }
+    return this.startLocalHls(options)
+  }
+
+  async stopStream(_streamId?: string) {
+    if (this.config.streamTarget === 'mediamtx') {
+      const session = this.sessionManager.peek()
+      if (session) await session.stopRtspPublisher()
+      return { stopped: true, streamId: 'mediamtx' }
+    }
+    const stream = this.current
+    if (!stream || stream.closed) return { stopped: false }
+    stream.closed = true
+    this.current = undefined
+    const session = this.sessionManager.peek()
+    if (session) await session.stopHlsRecorder()
+    try { await fs.rm(stream.dir, { recursive: true, force: true }) } catch {}
+    return { stopped: true, streamId: stream.streamId }
+  }
+
+  async stopAll() { await this.stopStream() }
+
+  getActiveStreamSummary(): { streamId: string; url: string } | undefined {
+    if (this.config.streamTarget === 'mediamtx') {
+      const url = this.resolveMediaMtxHlsUrl()
+      return url ? { streamId: 'mediamtx', url } : undefined
+    }
+    const stream = this.current
+    if (stream && !stream.closed) return { streamId: stream.streamId, url: this.streamUrl(stream.streamId) }
+    return undefined
+  }
+
+  // ---------- implementations ----------
+  private async startLocalHls(options?: { fps?: number; quality?: number }) {
     const existing = this.current
     if (existing && !existing.closed) {
       if (options?.fps !== undefined) existing.fps = options.fps
@@ -794,7 +908,10 @@ class StreamManager {
     const streamId = 'default'
     const dir = path.join(this.hlsRoot, streamId)
     const session = this.sessionManager.get()
-    await session.ensureHlsRecorder(dir, { fps: options?.fps ?? this.config.streamDefaults.fps, quality: options?.quality ?? this.config.streamDefaults.quality })
+    await session.ensureHlsRecorder(dir, {
+      fps: options?.fps ?? this.config.streamDefaults.fps,
+      quality: options?.quality ?? this.config.streamDefaults.quality,
+    })
 
     const stream: StreamRequest = {
       streamId,
@@ -808,52 +925,32 @@ class StreamManager {
     return { streamId, url: this.streamUrl(streamId), created: true }
   }
 
-  async getStream(options?: { fps?: number; quality?: number }): Promise<{ streamId: string; url: string; created: boolean }> {
-    const existing = this.current
-    if (existing && !existing.closed) {
-      if (options?.fps !== undefined || options?.quality !== undefined) {
-        return this.startStream(options)
-      }
-      return { streamId: existing.streamId, url: this.streamUrl(existing.streamId), created: false }
+  private async startMediaMtxHls() {
+    if (!this.config.mtxRtspUrl) {
+      throw new Error('mtxRtspUrl is required for streamTarget=mediamtx')
     }
-    return this.startStream(options)
+    const session = this.sessionManager.get()
+    await session.ensureRtspPublisher(this.config.mtxRtspUrl, {
+      fps: this.config.mtxFps,
+      bitrateK: this.config.mtxBitrateK,
+      audioSource: this.config.audioSource,
+    })
+    const url = this.resolveMediaMtxHlsUrl()
+    return { streamId: 'mediamtx', url, created: true }
   }
 
-  getActiveStreamSummary(): { streamId: string; url: string } | undefined {
-    const stream = this.current
-    if (stream && !stream.closed) {
-      return { streamId: stream.streamId, url: this.streamUrl(stream.streamId) }
-    }
-    return undefined
-  }
-
-  async stopStream(streamId?: string): Promise<{ stopped: boolean; streamId?: string }> {
-    const stream = this.current
-    if (!stream || stream.closed) {
-      return { stopped: false }
-    }
-    if (streamId && streamId !== stream.streamId) {
-      return { stopped: false }
-    }
-    stream.closed = true
-    this.current = undefined
-
-    const session = this.sessionManager.peek()
-    if (session) {
-      await session.stopHlsRecorder()
-    }
-    try {
-      await fs.rm(stream.dir, { recursive: true, force: true })
-    } catch {}
-    return { stopped: true, streamId: stream.streamId }
-  }
-
-  async stopAll() {
-    await this.stopStream()
-  }
-
+  // ---------- helpers ----------
   private streamUrl(streamId: string): string {
     return `${this.baseUrlFactory()}${this.config.streamPath}/${streamId}/index.m3u8`
+  }
+
+  private resolveMediaMtxHlsUrl(): string {
+    if (this.config.mtxHlsUrl && this.config.mtxHlsUrl.trim()) return this.config.mtxHlsUrl.trim()
+    // fallback: rtsp://host:8554/path  ->  https://host:8888/path/index.m3u8
+    return this.config.mtxRtspUrl!
+      .replace(/^rtsp:\/\//i, 'https://')
+      .replace(':8554/', ':8888/')
+      .replace(/\/$/, '') + '/index.m3u8'
   }
 }
 
@@ -1163,6 +1260,12 @@ async function main() {
       string: true,
       describe: 'Enable streaming features (e.g. --stream auto --stream functions).',
     })
+    .option('streamTarget', { type: 'string', choices: ['local', 'mediamtx'], default: 'local' })
+    .option('mtxRtspUrl', { type: 'string', describe: 'RTSP publish URL for MediaMTX (when --streamTarget mediamtx)' })
+    .option('mtxHlsUrl', { type: 'string', describe: 'Explicit HLS playback URL for MediaMTX (optional)' })
+    .option('mtxFps', { type: 'number', default: 25 })
+    .option('mtxBitrateK', { type: 'number', default: 2500 })
+    .option('audioSource', { type: 'string', choices: ['none','anullsrc','pulse'], default: 'anullsrc' })
     .option('previewPath', { type: 'string', describe: 'Mount an HTML preview page at the given path (requires --stream).' })
     .option('chromePath', { type: 'string', describe: 'Path to Chrome/Chromium executable launched by Puppeteer (default: bundled binary).' })
     .option('ffmpegPath', { type: 'string', describe: 'Path to ffmpeg binary used for display capture (default: ffmpeg).' })
@@ -1231,6 +1334,12 @@ async function main() {
     },
     streamEnabled,
     streamFunctions: streamFunctionsEnabled,
+    streamTarget: (argv.streamTarget as StreamTarget) ?? 'local',
+    mtxRtspUrl: argv.mtxRtspUrl,
+    mtxHlsUrl: argv.mtxHlsUrl,
+    mtxFps: Math.max(1, Math.min(60, argv.mtxFps ?? 25)),
+    mtxBitrateK: Math.max(200, Math.min(20000, argv.mtxBitrateK ?? 2500)),
+    audioSource: (argv.audioSource as 'none'|'anullsrc'|'pulse') ?? 'anullsrc',
     previewPath: previewRoute,
     chromePath: chromeExecutable,
     ffmpegPath: argv.ffmpegPath && argv.ffmpegPath.trim() ? argv.ffmpegPath.trim() : 'ffmpeg',

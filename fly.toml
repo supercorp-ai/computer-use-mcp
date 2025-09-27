@@ -1,0 +1,76 @@
+# fly.toml — computer-use MCP that publishes RTSP to MediaMTX (same org)
+
+app = "superstream-computer-use"
+primary_region = "iad"
+
+# Keep one machine up; Chromium + ffmpeg like stability
+auto_stop_machines = "off"
+auto_start_machines = true
+min_machines_running = 1
+
+[build]
+  dockerfile = "Dockerfile"
+
+# ---- Runtime env you might want globally (safe defaults) ----
+[env]
+  # If you ever use the built-in preview page, this helps generate absolute URLs
+  PUBLIC_BASE_URL = "https://superstream-computer-use.fly.dev"
+
+# ---- Process command (pass CLI flags to your MCP) ----
+# You said you've added streamTarget + MediaMTX args; we wire them here.
+# - Publishes RTSP to: rtsp://superstream-mediamtx.internal:8554/computer_use
+# - Returns HLS play URL for *_aac: http://superstream-mediamtx.internal:8888/computer_use_aac/index.m3u8
+# - Sets Chrome wrapper path from your Dockerfile
+[processes]
+  app = "node dist/index.js \
+    --transport http \
+    --port 8000 \
+    --displayWidth 1280 --displayHeight 720 \
+    --toolsPrefix computer_ \
+    --chromePath /usr/local/bin/chromium-wrapper \
+    --ffmpegPath ffmpeg \
+    --xvfbPath Xvfb \
+    --stream functions \
+    --streamPath /streams \
+    --publicBaseUrl ${PUBLIC_BASE_URL} \
+    --streamFps 25 \
+    --streamQuality 80 \
+    --imageOutputFormat mcp-spec \
+    --streamTarget mediamtx \
+    --mtxRtspUrl rtsp://superstream-mediamtx.internal:8554/computer_use \
+    --mtxHlsUrl http://superstream-mediamtx.internal:8888/computer_use_aac/index.m3u8 \
+    --mtxFps 25 \
+    --mtxBitrateK 2500 \
+    --audioSource anullsrc"
+
+# ---- Public HTTP for health/preview (maps :80/:443 -> container :8000) ----
+[[services]]
+  internal_port = 8000
+  protocol = "tcp"
+
+  [services.concurrency]
+    type = "connections"
+    soft_limit = 200
+    hard_limit = 400
+
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+
+  # Simple health check against /healthz implemented in your app
+  [[services.http_checks]]
+    interval = "10s"
+    timeout = "2s"
+    method = "GET"
+    path = "/healthz"
+    protocol = "http"
+
+# Give Chromium + ffmpeg enough headroom
+[vm]
+  cpu_kind = "performance"
+  cpus = 2
+  memory_mb = 4096
