@@ -875,7 +875,7 @@ function buildComputerCallResult(
           image_url: `data:${mimeType};base64,${base64Image}`,
           // detail/file_id omitted intentionally
         },
-      ],
+      ] as any
     }
   }
 
