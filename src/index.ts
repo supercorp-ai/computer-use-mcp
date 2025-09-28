@@ -1320,8 +1320,9 @@ async function main() {
   }
 
   const streamPath = normalizeRoutePath(argv.streamPath, '/streams')
-  const internalOrigin = `http://127.0.0.1:${argv.port}`
-  const blankPageUrl = `${internalOrigin}/blank`
+  // const internalOrigin = `http://127.0.0.1:${argv.port}`
+  const blankPageUrl = 'https://chatgpt.com'
+          // `${internalOrigin}/blank`
   let chromeExecutable: string | undefined
   try {
     chromeExecutable = argv.chromePath && argv.chromePath.trim() ? argv.chromePath.trim() : executablePath()
