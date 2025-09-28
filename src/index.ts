@@ -632,6 +632,7 @@ class ComputerSession {
       '--disable-default-apps',
       '--disable-translate',
       '--disable-sync',
+      '--window-position=0,0',
       '--metrics-recording-only',
       '--no-first-run',
       '--no-default-browser-check',
