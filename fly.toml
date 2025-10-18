@@ -9,7 +9,7 @@ min_machines_running = 1
   dockerfile = "Dockerfile"
 
 [processes]
-  app = "--transport http --port 8000 --blankPageUrl https://chatgpt.com --displayHeight 1200 --displayWidth 720 --stream auto --previewPath /preview --publicBaseUrl https://superstream-computer-use.fly.dev --streamTarget mediamtx --mtxRtspUrl rtsp://superstream-mediamtx.internal:8554/computer_use --mtxHlsUrl http://superstream-mediamtx.internal:8888/computer_use_aac/index.m3u8"
+  app = "--transport http --port 8000 --blankPageUrl https://duck.ai --displayHeight 1200 --displayWidth 720 --stream auto --previewPath /preview --publicBaseUrl https://superstream-computer-use.fly.dev --streamTarget mediamtx --mtxRtspUrl rtsp://superstream-mediamtx.internal:8554/computer_use --mtxHlsUrl http://superstream-mediamtx.internal:8888/computer_use_aac/index.m3u8"
 
 [[services]]
   processes = ["app"]
