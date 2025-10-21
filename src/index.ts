@@ -1321,7 +1321,7 @@ async function main() {
 
   const streamPath = normalizeRoutePath(argv.streamPath, '/streams')
   // const internalOrigin = `http://127.0.0.1:${argv.port}`
-  const blankPageUrl = 'https://duck.ai'
+  const blankPageUrl = 'https://mini-app.superstream.sh/en/chat'
           // `${internalOrigin}/blank`
   let chromeExecutable: string | undefined
   try {

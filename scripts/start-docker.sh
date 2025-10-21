@@ -7,9 +7,10 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 cd "$PROJECT_ROOT"
 
-docker build -t "$IMAGE" .
+docker build --platform=linux/amd64 -t "$IMAGE" .
 
 docker run --rm \
+  --platform=linux/amd64 \
   -p 8000:8000 \
   "$IMAGE" \
-  --chromePath /usr/local/bin/chromium-wrapper "$@"
+  "$@"

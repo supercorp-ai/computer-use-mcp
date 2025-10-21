@@ -9,7 +9,8 @@
     "lint:fix": "eslint . --ext .ts --fix",
     "start": "node dist/index.js",
     "start:mac": "node dist/index.js --xvfbPath /opt/X11/bin/Xvfb --ffmpegPath $(command -v ffmpeg)",
-    "start:docker": "bash scripts/start-docker.sh"
+    "start:docker": "bash scripts/start-docker.sh",
+    "tunnel": "cloudflared tunnel --config cloudflared-config.yml run"
   },
   "repository": {
     "type": "git",
