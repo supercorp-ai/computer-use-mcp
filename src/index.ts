@@ -56,10 +56,12 @@ interface Config {
   pointerTool?: string
   blankPageUrl: string
   imageOutputFormat: ImageOutputFormat
+  postActionDelayMs: number
+  actionScreenshotMode: 'auto' | 'manual'
 }
 
 interface ActionResult {
-  screenshot: { buffer: Buffer; contentType: string }
+  screenshot?: { buffer: Buffer; contentType: string }
   description: string
 }
 
@@ -334,13 +336,25 @@ class ComputerSession {
 
   async perform(action: ComputerAction): Promise<ActionResult> {
     const description = humanActionSummary(action)
-    const capture = await this.enqueue(async () => {
+    const screenshot = await this.enqueue(async () => {
       await this.ensureEnvironment()
       const page = this.page as Page
       await this.applyAction(page, action)
+
+      const shouldDelay =
+        this.config.postActionDelayMs > 0 &&
+        !['wait', 'screenshot'].includes(action.type)
+      if (shouldDelay) {
+        await delay(this.config.postActionDelayMs)
+      }
+
+      const shouldCapture =
+        action.type === 'screenshot' || this.config.actionScreenshotMode === 'auto'
+      if (!shouldCapture) return undefined
+
       return await this.captureDisplay()
     })
-    return { screenshot: capture, description }
+    return { screenshot, description }
   }
 
   async close() {
@@ -1040,6 +1054,18 @@ function createComputerUseServer(context: ServerContext): McpServer {
       console.log(`[computer-mcp] action -> ${humanActionSummary(action)}`)
       const session = sessionManager.get()
       const result = await session.perform(action)
+
+      if (!result.screenshot) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'Done.',
+            },
+          ],
+        }
+      }
+
       const base64Image = result.screenshot.buffer.toString('base64')
       return buildComputerCallResult(action, base64Image, result.screenshot.contentType, config.imageOutputFormat)
     }
@@ -1292,6 +1318,17 @@ async function main() {
       default: 'mcp-spec',
       describe: 'Format of screenshot in tool result content.',
     })
+    .option('postActionDelayMs', {
+      type: 'number',
+      default: 1000,
+      describe: 'Delay in milliseconds after actions before capturing a screenshot (set to 0 to disable).',
+    })
+    .option('actionScreenshots', {
+      type: 'string',
+      choices: ['auto', 'manual'],
+      default: 'auto',
+      describe: 'Screenshot behavior for non-screenshot actions (auto captures every action, manual requires explicit screenshots tool).',
+    })
     .help()
     .parseSync()
 
@@ -1323,6 +1360,14 @@ async function main() {
   // const internalOrigin = `http://127.0.0.1:${argv.port}`
   const blankPageUrl = 'https://mini-app.superstream.sh/en/chat'
           // `${internalOrigin}/blank`
+  const postActionDelayMs =
+    typeof argv.postActionDelayMs === 'number' && Number.isFinite(argv.postActionDelayMs)
+      ? Math.max(0, argv.postActionDelayMs)
+      : 1000
+  const actionScreenshotMode: Config['actionScreenshotMode'] =
+    typeof argv.actionScreenshots === 'string' && argv.actionScreenshots.toLowerCase() === 'manual'
+      ? 'manual'
+      : 'auto'
   let chromeExecutable: string | undefined
   try {
     chromeExecutable = argv.chromePath && argv.chromePath.trim() ? argv.chromePath.trim() : executablePath()
@@ -1363,6 +1408,8 @@ async function main() {
     displayBase: Math.max(1, Math.min(60000, argv.displayStart ?? 90)),
     blankPageUrl,
     imageOutputFormat: (argv.imageOutputFormat as ImageOutputFormat) ?? 'mcp-spec',
+    postActionDelayMs,
+    actionScreenshotMode,
   }
 
   const baseUrl = resolveBaseUrl(config)
