@@ -2,6 +2,9 @@ FROM ghcr.io/puppeteer/puppeteer:24.2.0
 WORKDIR /app
 USER root
 
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
+    PLAYWRIGHT_BROWSERS_PATH=0
+
 RUN apt-get update && apt-get install -y --no-install-recommends xvfb ffmpeg xdotool \
   && rm -rf /var/lib/apt/lists/*
 

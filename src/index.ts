@@ -11,7 +11,8 @@ import os from 'node:os'
 import path from 'node:path'
 
 import express, { type Application, type NextFunction, type Request, type Response as ExpressResponse } from 'express'
-import puppeteer, { executablePath, type Browser, type Page } from 'puppeteer'
+import puppeteer, { executablePath, type Browser as PuppeteerBrowser, type Page as PuppeteerPage } from 'puppeteer'
+import { chromium, type Browser as PlaywrightBrowser, type BrowserContext as PlaywrightBrowserContext, type Page as PlaywrightPage } from 'playwright'
 import { hideBin } from 'yargs/helpers'
 import yargs from 'yargs'
 import { z } from 'zod'
@@ -27,10 +28,13 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 // -----------------------------------------------------------------------------
 type ImageOutputFormat = 'mcp-spec' | 'openai-responses-api'
 type StreamTarget = 'local' | 'mediamtx'
+type BrowserBackend = PuppeteerBrowser | PlaywrightBrowser
+type BrowserPage = PuppeteerPage | PlaywrightPage
 
 interface Config {
   port: number
   transport: 'sse' | 'stdio' | 'http'
+  automationDriver: 'puppeteer' | 'playwright'
   displayWidth: number
   displayHeight: number
   environment: 'browser'
@@ -323,8 +327,9 @@ function humanActionSummary(action: z.infer<typeof actionSchema>): string {
 // Computer session management (Puppeteer-backed virtual browser)
 // -----------------------------------------------------------------------------
 class ComputerSession {
-  private browser?: Browser
-  private page?: Page
+  private browser?: BrowserBackend
+  private page?: BrowserPage
+  private playwrightContext?: PlaywrightBrowserContext
   private queue: Promise<unknown> = Promise.resolve()
   private hlsRecorder?: HlsRecorder
   private readonly display: VirtualDisplay
@@ -338,8 +343,7 @@ class ComputerSession {
     const description = humanActionSummary(action)
     const screenshot = await this.enqueue(async () => {
       await this.ensureEnvironment()
-      const page = this.page as Page
-      await this.applyAction(page, action)
+      await this.applyAction(this.page, action)
 
       const shouldDelay =
         this.config.postActionDelayMs > 0 &&
@@ -361,9 +365,16 @@ class ComputerSession {
     await this.enqueue(async () => {
       await this.stopHlsRecorder()
       await this.stopRtspPublisher()
-      try {
-        await this.page?.close()
-      } catch {}
+      if (this.config.automationDriver === 'playwright') {
+        try {
+          await this.playwrightContext?.close()
+        } catch {}
+        this.playwrightContext = undefined
+      } else {
+        try {
+          await (this.page as PuppeteerPage | undefined)?.close()
+        } catch {}
+      }
       this.page = undefined
       try {
         await this.browser?.close()
@@ -626,6 +637,16 @@ class ComputerSession {
     await this.display.start()
 
     if (this.browser) {
+      if (this.config.automationDriver === 'playwright') {
+        try {
+          await this.playwrightContext?.close()
+        } catch {}
+        this.playwrightContext = undefined
+      } else {
+        try {
+          await (this.page as PuppeteerPage | undefined)?.close()
+        } catch {}
+      }
       try {
         await this.browser.close()
       } catch {}
@@ -634,6 +655,7 @@ class ComputerSession {
     }
 
     const viewport = { width: this.config.displayWidth, height: this.config.displayHeight }
+    const targetUrl = this.config.defaultUrl?.trim() || this.config.blankPageUrl
     const args = [
       '--no-sandbox',
       '--test-type',
@@ -661,6 +683,42 @@ class ComputerSession {
       console.warn('[computer-mcp] Headless mode requested but full-browser streaming requires a headful Chrome window; launching headful anyway.')
     }
 
+    if (this.config.automationDriver === 'playwright') {
+      const browser = await chromium.launch({
+        headless: false,
+        executablePath: this.config.chromePath,
+        args,
+        ignoreDefaultArgs: ['--enable-automation'],
+        env: { ...process.env, DISPLAY: this.display.displayEnv },
+      })
+
+      const context = await browser.newContext({
+        viewport,
+        deviceScaleFactor: 1,
+      })
+
+      const page = await context.newPage()
+      await page.addInitScript(() => {
+        Object.defineProperty(navigator, 'webdriver', {
+          get: () => undefined,
+        })
+      })
+
+      this.browser = browser
+      this.playwrightContext = context
+      this.page = page
+
+      try {
+        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 })
+      } catch (err) {
+        console.warn(`[computer-mcp] (${this.memoryKey}) failed to open initial url ${targetUrl}:`, err)
+      }
+      try {
+        await page.bringToFront()
+      } catch {}
+      return
+    }
+
     const browser = await puppeteer.launch({
       headless: false,
       executablePath: this.config.chromePath,
@@ -672,25 +730,25 @@ class ComputerSession {
 
     this.browser = browser
     const pages = await browser.pages()
-    this.page = pages.length ? pages[0] : await browser.newPage()
-    await this.page.evaluateOnNewDocument(() => {
+    const page = pages.length ? pages[0] : await browser.newPage()
+    this.page = page
+    await page.evaluateOnNewDocument(() => {
       Object.defineProperty(navigator, 'webdriver', {
         get: () => undefined,
       })
     })
-    await this.page.setViewport({ ...viewport, deviceScaleFactor: 1 })
-    const targetUrl = this.config.defaultUrl?.trim() || this.config.blankPageUrl
+    await page.setViewport({ ...viewport, deviceScaleFactor: 1 })
     try {
-      await this.page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 })
+      await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 })
     } catch (err) {
       console.warn(`[computer-mcp] (${this.memoryKey}) failed to open initial url ${targetUrl}:`, err)
     }
     try {
-      await this.page.bringToFront()
+      await page.bringToFront()
     } catch {}
   }
 
-  private async applyAction(_page: Page, action: z.infer<typeof actionSchema>) {
+  private async applyAction(_page: BrowserPage | undefined, action: z.infer<typeof actionSchema>) {
     switch (action.type) {
       case 'click':
         await this.moveSystemPointer(action.x, action.y)
@@ -1286,6 +1344,12 @@ async function main() {
   const argv = yargs(hideBin(process.argv))
     .option('port', { type: 'number', default: 8000 })
     .option('transport', { type: 'string', choices: ['sse', 'stdio', 'http'], default: 'http' })
+    .option('automationDriver', {
+      type: 'string',
+      choices: ['puppeteer', 'playwright'],
+      default: 'puppeteer',
+      describe: 'Automation backend used to control the browser.',
+    })
     .option('displayWidth', { type: 'number', default: 1280 })
     .option('displayHeight', { type: 'number', default: 720 })
     .option('environment', { type: 'string', default: 'browser' })
@@ -1360,6 +1424,10 @@ async function main() {
   // const internalOrigin = `http://127.0.0.1:${argv.port}`
   const blankPageUrl = 'https://mini-app.superstream.sh/en/chat'
           // `${internalOrigin}/blank`
+  const automationDriver: Config['automationDriver'] =
+    typeof argv.automationDriver === 'string' && argv.automationDriver.toLowerCase() === 'playwright'
+      ? 'playwright'
+      : 'puppeteer'
   const postActionDelayMs =
     typeof argv.postActionDelayMs === 'number' && Number.isFinite(argv.postActionDelayMs)
       ? Math.max(0, argv.postActionDelayMs)
@@ -1381,6 +1449,7 @@ async function main() {
   const config: Config = {
     port: argv.port,
     transport: argv.transport as Config['transport'],
+    automationDriver,
     displayWidth: argv.displayWidth,
     displayHeight: argv.displayHeight,
     environment: 'browser',
@@ -1411,6 +1480,25 @@ async function main() {
     postActionDelayMs,
     actionScreenshotMode,
   }
+
+  console.log('[computer-mcp] startup config', {
+    transport: config.transport,
+    port: config.port,
+    automationDriver: config.automationDriver,
+    displayWidth: config.displayWidth,
+    displayHeight: config.displayHeight,
+    headless: config.headless,
+    defaultUrl: config.defaultUrl,
+    toolsPrefix: config.toolsPrefix,
+    postActionDelayMs: config.postActionDelayMs,
+    actionScreenshotMode: config.actionScreenshotMode,
+    streamEnabled: config.streamEnabled,
+    streamFunctions: config.streamFunctions,
+    streamTarget: config.streamTarget,
+    chromePath: config.chromePath,
+    ffmpegPath: config.ffmpegPath,
+    xvfbPath: config.xvfbPath,
+  })
 
   const baseUrl = resolveBaseUrl(config)
   const sessionManager = new ComputerSessionManager(config)
