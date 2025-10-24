@@ -6,13 +6,13 @@ import type { Server } from 'node:http'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { Socket } from 'node:net'
 import { once } from 'node:events'
-import { promises as fs } from 'node:fs'
+import { promises as fs, constants as fsConstants } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
 import express, { type Application, type NextFunction, type Request, type Response as ExpressResponse } from 'express'
 import puppeteer, { executablePath, type Browser as PuppeteerBrowser, type Page as PuppeteerPage } from 'puppeteer'
-import { chromium, type Browser as PlaywrightBrowser, type BrowserContext as PlaywrightBrowserContext, type Page as PlaywrightPage } from 'playwright'
+import type { Browser as PlaywrightBrowser, BrowserContext as PlaywrightBrowserContext, Page as PlaywrightPage } from 'playwright'
 import { hideBin } from 'yargs/helpers'
 import yargs from 'yargs'
 import { z } from 'zod'
@@ -30,11 +30,13 @@ type ImageOutputFormat = 'mcp-spec' | 'openai-responses-api'
 type StreamTarget = 'local' | 'mediamtx'
 type BrowserBackend = PuppeteerBrowser | PlaywrightBrowser
 type BrowserPage = PuppeteerPage | PlaywrightPage
+type PlaywrightModule = typeof import('playwright')
 
 interface Config {
   port: number
   transport: 'sse' | 'stdio' | 'http'
   automationDriver: 'puppeteer' | 'playwright'
+  stealth: boolean
   displayWidth: number
   displayHeight: number
   environment: 'browser'
@@ -330,6 +332,9 @@ class ComputerSession {
   private browser?: BrowserBackend
   private page?: BrowserPage
   private playwrightContext?: PlaywrightBrowserContext
+  private playwrightProfileDir?: string
+  private playwrightModule?: PlaywrightModule
+  private playwrightLaunchLogged = false
   private queue: Promise<unknown> = Promise.resolve()
   private hlsRecorder?: HlsRecorder
   private readonly display: VirtualDisplay
@@ -370,6 +375,12 @@ class ComputerSession {
           await this.playwrightContext?.close()
         } catch {}
         this.playwrightContext = undefined
+        if (this.playwrightProfileDir) {
+          try {
+            await fs.rm(this.playwrightProfileDir, { recursive: true, force: true })
+          } catch {}
+          this.playwrightProfileDir = undefined
+        }
       } else {
         try {
           await (this.page as PuppeteerPage | undefined)?.close()
@@ -381,6 +392,7 @@ class ComputerSession {
       } catch {}
       this.browser = undefined
       await this.display.stop()
+      this.playwrightLaunchLogged = false
     })
   }
 
@@ -633,6 +645,33 @@ class ComputerSession {
     return next
   }
 
+  private async loadPlaywrightModule(): Promise<PlaywrightModule> {
+    if (this.config.automationDriver !== 'playwright') {
+      throw new Error('Playwright module requested but automationDriver is not "playwright".')
+    }
+    if (this.playwrightModule) {
+      return this.playwrightModule
+    }
+    const moduleName = this.config.stealth ? 'patchright' : 'playwright'
+    try {
+      const module = (await import(moduleName)) as PlaywrightModule
+      this.playwrightModule = module
+      return module
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      throw new Error(`Failed to load ${moduleName}. Ensure the dependency is installed. ${message}`)
+    }
+  }
+
+  private async ensurePlaywrightProfileDir(): Promise<string> {
+    if (this.playwrightProfileDir) {
+      return this.playwrightProfileDir
+    }
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), `computer-mcp-playwright-${this.memoryKey}-`))
+    this.playwrightProfileDir = dir
+    return dir
+  }
+
   private async launchBrowser() {
     await this.display.start()
 
@@ -642,6 +681,12 @@ class ComputerSession {
           await this.playwrightContext?.close()
         } catch {}
         this.playwrightContext = undefined
+        if (this.playwrightProfileDir) {
+          try {
+            await fs.rm(this.playwrightProfileDir, { recursive: true, force: true })
+          } catch {}
+          this.playwrightProfileDir = undefined
+        }
       } else {
         try {
           await (this.page as PuppeteerPage | undefined)?.close()
@@ -652,6 +697,7 @@ class ComputerSession {
       } catch {}
       this.browser = undefined
       this.page = undefined
+      this.playwrightLaunchLogged = false
     }
 
     const viewport = { width: this.config.displayWidth, height: this.config.displayHeight }
@@ -678,18 +724,68 @@ class ComputerSession {
       '--disable-blink-features=AutomationControlled',
       '--disable-search-engine-choice-screen',
     ]
+    const env = { ...process.env, DISPLAY: this.display.displayEnv }
 
     if (this.config.headless) {
       console.warn('[computer-mcp] Headless mode requested but full-browser streaming requires a headful Chrome window; launching headful anyway.')
     }
 
     if (this.config.automationDriver === 'playwright') {
-      const browser = await chromium.launch({
+      const playwright = await this.loadPlaywrightModule()
+      const chromiumSandbox = typeof process.getuid === 'function' && process.getuid() === 0 ? false : undefined
+
+      if (this.config.stealth) {
+        const userDataDir = await this.ensurePlaywrightProfileDir()
+        const context = await playwright.chromium.launchPersistentContext(userDataDir, {
+          headless: false,
+          executablePath: this.config.chromePath,
+          channel: this.config.chromePath ? undefined : 'chrome',
+          viewport: null,
+          chromiumSandbox,
+          env,
+        })
+        const browser = context.browser()
+        const pages = context.pages()
+        const page = pages.length ? pages[0] : await context.newPage()
+        await page.addInitScript(() => {
+          Object.defineProperty(navigator, 'webdriver', {
+            get: () => undefined,
+          })
+        })
+
+        this.playwrightContext = context
+        this.browser = browser ?? (context as unknown as BrowserBackend)
+        this.page = page
+
+        if (!this.playwrightLaunchLogged) {
+          const moduleName = this.config.stealth ? 'patchright' : 'playwright'
+          let executable: string | undefined
+          try {
+            executable = this.config.chromePath ?? (typeof playwright.chromium.executablePath === 'function' ? playwright.chromium.executablePath() : undefined)
+          } catch {}
+          console.log(`[computer-mcp] (${this.memoryKey}) ${moduleName} persistent context ready (${executable ?? 'channel:chrome'})`)
+          this.playwrightLaunchLogged = true
+        }
+
+        try {
+          await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 })
+        } catch (err) {
+          console.warn(`[computer-mcp] (${this.memoryKey}) failed to open initial url ${targetUrl}:`, err)
+        }
+        try {
+          await page.bringToFront()
+        } catch {}
+        return
+      }
+
+      const browser = await playwright.chromium.launch({
         headless: false,
         executablePath: this.config.chromePath,
+        channel: this.config.chromePath ? undefined : 'chrome',
         args,
         ignoreDefaultArgs: ['--enable-automation'],
-        env: { ...process.env, DISPLAY: this.display.displayEnv },
+        chromiumSandbox,
+        env,
       })
 
       const context = await browser.newContext({
@@ -707,6 +803,16 @@ class ComputerSession {
       this.browser = browser
       this.playwrightContext = context
       this.page = page
+
+      if (!this.playwrightLaunchLogged) {
+        const moduleName = this.config.stealth ? 'patchright' : 'playwright'
+        let executable: string | undefined
+        try {
+          executable = this.config.chromePath ?? (typeof playwright.chromium.executablePath === 'function' ? playwright.chromium.executablePath() : undefined)
+        } catch {}
+        console.log(`[computer-mcp] (${this.memoryKey}) ${moduleName} context ready (${executable ?? 'channel:chrome'})`)
+        this.playwrightLaunchLogged = true
+      }
 
       try {
         await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 })
@@ -785,7 +891,7 @@ class ComputerSession {
         await this.performScroll(action.scroll_x, action.scroll_y)
         return
       case 'type':
-        await this.runXdotool(['type', '--delay', '0', '--', action.text])
+        await this.runXdotool(['type', '--delay', '40', '--', action.text])
         return
       case 'wait':
         await delay(1000)
@@ -1350,6 +1456,11 @@ async function main() {
       default: 'puppeteer',
       describe: 'Automation backend used to control the browser.',
     })
+    .option('stealth', {
+      type: 'boolean',
+      default: false,
+      describe: 'Enable stealth browser patches (requires --automationDriver playwright).',
+    })
     .option('displayWidth', { type: 'number', default: 1280 })
     .option('displayHeight', { type: 'number', default: 720 })
     .option('environment', { type: 'string', default: 'browser' })
@@ -1428,6 +1539,11 @@ async function main() {
     typeof argv.automationDriver === 'string' && argv.automationDriver.toLowerCase() === 'playwright'
       ? 'playwright'
       : 'puppeteer'
+  const stealth = Boolean(argv.stealth)
+  if (stealth && automationDriver !== 'playwright') {
+    console.error('Error: --stealth requires --automationDriver playwright.')
+    process.exit(1)
+  }
   const postActionDelayMs =
     typeof argv.postActionDelayMs === 'number' && Number.isFinite(argv.postActionDelayMs)
       ? Math.max(0, argv.postActionDelayMs)
@@ -1436,12 +1552,37 @@ async function main() {
     typeof argv.actionScreenshots === 'string' && argv.actionScreenshots.toLowerCase() === 'manual'
       ? 'manual'
       : 'auto'
+  const chromePathArg = typeof argv.chromePath === 'string' && argv.chromePath.trim() ? argv.chromePath.trim() : undefined
+  const envChromePath = typeof process.env.CHROME_PATH === 'string' && process.env.CHROME_PATH.trim()
+    ? process.env.CHROME_PATH.trim()
+    : undefined
   let chromeExecutable: string | undefined
-  try {
-    chromeExecutable = argv.chromePath && argv.chromePath.trim() ? argv.chromePath.trim() : executablePath()
-  } catch (err) {
-    console.warn('[computer-mcp] Unable to determine Chrome executable path automatically:', err)
-    chromeExecutable = argv.chromePath?.trim()
+  if (chromePathArg) {
+    chromeExecutable = chromePathArg
+  } else if (envChromePath) {
+    chromeExecutable = envChromePath
+  } else if (automationDriver === 'playwright') {
+    const candidateChromePaths = [
+      '/usr/bin/google-chrome-stable',
+      '/usr/bin/google-chrome',
+      '/usr/bin/google-chrome-beta',
+    ]
+    for (const candidate of candidateChromePaths) {
+      try {
+        await fs.access(candidate, fsConstants.X_OK)
+        chromeExecutable = candidate
+        break
+      } catch {}
+    }
+  }
+
+  if (!chromeExecutable && automationDriver === 'puppeteer') {
+    try {
+      chromeExecutable = executablePath()
+    } catch (err) {
+      console.warn('[computer-mcp] Unable to determine Chrome executable path automatically:', err)
+      chromeExecutable = undefined
+    }
   }
 
   const previewRoute = argv.previewPath && argv.previewPath.trim() ? normalizeRoutePath(argv.previewPath.trim(), '/preview') : undefined
@@ -1450,6 +1591,7 @@ async function main() {
     port: argv.port,
     transport: argv.transport as Config['transport'],
     automationDriver,
+    stealth,
     displayWidth: argv.displayWidth,
     displayHeight: argv.displayHeight,
     environment: 'browser',
@@ -1485,6 +1627,7 @@ async function main() {
     transport: config.transport,
     port: config.port,
     automationDriver: config.automationDriver,
+    stealth: config.stealth,
     displayWidth: config.displayWidth,
     displayHeight: config.displayHeight,
     headless: config.headless,

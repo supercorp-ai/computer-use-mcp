@@ -25,6 +25,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.17.1",
     "express": "^4.21.2",
+    "patchright": "^1.56.1",
     "playwright": "^1.49.0",
     "puppeteer": "^23.7.0",
     "yargs": "^17.7.2",
