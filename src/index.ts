@@ -803,28 +803,40 @@ class ComputerSession {
 
     const viewport = { width: this.config.displayWidth, height: this.config.displayHeight }
     const targetUrl = this.config.defaultUrl?.trim() || this.config.blankPageUrl
-    const args = [
-      '--no-sandbox',
-      '--test-type',
-      '--disable-dev-shm-usage',
-      '--disable-background-networking',
-      '--disable-renderer-backgrounding',
-      '--disable-background-timer-throttling',
-      '--disable-client-side-phishing-detection',
-      '--disable-popup-blocking',
-      '--disable-default-apps',
-      '--disable-translate',
-      '--disable-sync',
-      '--window-position=0,0',
-      '--metrics-recording-only',
-      '--no-first-run',
-      '--no-default-browser-check',
+
+    const args: string[] = [
       '--start-maximized',
+      '--window-position=0,0',
       `--window-size=${viewport.width},${viewport.height}`,
-      '--disable-infobars',
-      '--disable-blink-features=AutomationControlled',
-      '--disable-search-engine-choice-screen',
+      '--test-type',
     ]
+
+    if (this.config.stealth) {
+      args.push('--disable-dev-shm-usage')
+    } else {
+      args.push(
+        '--disable-dev-shm-usage',
+        '--disable-background-networking',
+        '--disable-renderer-backgrounding',
+        '--disable-background-timer-throttling',
+        '--disable-client-side-phishing-detection',
+        '--disable-popup-blocking',
+        '--disable-default-apps',
+        '--disable-translate',
+        '--disable-sync',
+        '--metrics-recording-only',
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--disable-infobars',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-search-engine-choice-screen'
+      )
+    }
+
+    const requiresNoSandbox = typeof process.geteuid === 'function' && process.geteuid() === 0
+    if (requiresNoSandbox) {
+      args.push('--no-sandbox')
+    }
     const env = { ...process.env, DISPLAY: this.display.displayEnv }
 
     if (this.config.headless) {
@@ -848,16 +860,10 @@ class ComputerSession {
         const browser = context.browser()
         const pages = context.pages()
         const page = pages.length ? pages[0] : await context.newPage()
-        await page.addInitScript(() => {
-          Object.defineProperty(navigator, 'webdriver', {
-            get: () => undefined,
-          })
-        })
 
         this.playwrightContext = context
         this.browser = browser ?? (context as unknown as BrowserBackend)
         this.page = page
-
         if (!this.playwrightLaunchLogged) {
           const moduleName = this.config.stealth ? 'patchright' : 'playwright'
           let executable: string | undefined
@@ -895,16 +901,10 @@ class ComputerSession {
       })
 
       const page = await context.newPage()
-      await page.addInitScript(() => {
-        Object.defineProperty(navigator, 'webdriver', {
-          get: () => undefined,
-        })
-      })
 
       this.browser = browser
       this.playwrightContext = context
       this.page = page
-
       if (!this.playwrightLaunchLogged) {
         const moduleName = this.config.stealth ? 'patchright' : 'playwright'
         let executable: string | undefined
@@ -939,11 +939,6 @@ class ComputerSession {
     const pages = await browser.pages()
     const page = pages.length ? pages[0] : await browser.newPage()
     this.page = page
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', {
-        get: () => undefined,
-      })
-    })
     await page.setViewport({ ...viewport, deviceScaleFactor: 1 })
     try {
       await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 })
