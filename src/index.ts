@@ -11,7 +11,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import express, { type Application, type NextFunction, type Request, type Response as ExpressResponse } from 'express'
-import puppeteer, { executablePath, type Browser as PuppeteerBrowser, type Page as PuppeteerPage } from 'puppeteer'
+import puppeteer, { executablePath, type Browser as PuppeteerBrowser, type Page as PuppeteerPage } from 'rebrowser-puppeteer'
 import type { Browser as PlaywrightBrowser, BrowserContext as PlaywrightBrowserContext, Page as PlaywrightPage } from 'playwright'
 import { hideBin } from 'yargs/helpers'
 import yargs from 'yargs'
@@ -335,6 +335,7 @@ class ComputerSession {
   private playwrightProfileDir?: string
   private playwrightModule?: PlaywrightModule
   private playwrightLaunchLogged = false
+  private readonly typingKeyIntervalMs = 12
   private queue: Promise<unknown> = Promise.resolve()
   private hlsRecorder?: HlsRecorder
   private readonly display: VirtualDisplay
@@ -422,6 +423,106 @@ class ComputerSession {
     const fps = Math.max(1, Math.min(30, Math.round(options.fps)))
     const quality = Math.max(10, Math.min(100, Math.round(options.quality)))
     return { fps, quality }
+  }
+
+  private buildKeySequenceForChar(char: string): string[][] | null {
+    if (!char) return null
+    if (char === '\r') return []
+    const lower = char.toLowerCase()
+    const baseKeyMap: Record<string, string> = {
+      ' ': 'space',
+      '\n': 'Return',
+      '\t': 'Tab',
+      '-': 'minus',
+      '=': 'equal',
+      '[': 'bracketleft',
+      ']': 'bracketright',
+      '\\': 'backslash',
+      ';': 'semicolon',
+      '\'': 'apostrophe',
+      ',': 'comma',
+      '.': 'period',
+      '/': 'slash',
+      '`': 'grave',
+    }
+    const shiftedKeyMap: Record<string, string> = {
+      '!': '1',
+      '@': '2',
+      '#': '3',
+      '$': '4',
+      '%': '5',
+      '^': '6',
+      '&': '7',
+      '*': '8',
+      '(': '9',
+      ')': '0',
+      '_': 'minus',
+      '+': 'equal',
+      '{': 'bracketleft',
+      '}': 'bracketright',
+      '|': 'backslash',
+      ':': 'semicolon',
+      '"': 'apostrophe',
+      '<': 'comma',
+      '>': 'period',
+      '?': 'slash',
+      '~': 'grave',
+    }
+
+    if (char >= 'a' && char <= 'z') {
+      return [
+        ['keydown', char],
+        ['keyup', char],
+      ]
+    }
+    if (char >= '0' && char <= '9') {
+      return [
+        ['keydown', char],
+        ['keyup', char],
+      ]
+    }
+    if (char >= 'A' && char <= 'Z') {
+      const key = lower
+      return [
+        ['keydown', 'Shift_L'],
+        ['keydown', key],
+        ['keyup', key],
+        ['keyup', 'Shift_L'],
+      ]
+    }
+    if (char in shiftedKeyMap) {
+      const key = shiftedKeyMap[char]
+      return [
+        ['keydown', 'Shift_L'],
+        ['keydown', key],
+        ['keyup', key],
+        ['keyup', 'Shift_L'],
+      ]
+    }
+    const baseKey = baseKeyMap[char]
+    if (baseKey) {
+      return [
+        ['keydown', baseKey],
+        ['keyup', baseKey],
+      ]
+    }
+    return null
+  }
+
+  private async typeWithXdotool(text: string) {
+    for (const char of text) {
+      const sequence = this.buildKeySequenceForChar(char)
+      if (sequence === null) {
+        await this.runXdotool(['type', '--delay', '0', '--', char])
+        await delay(this.typingKeyIntervalMs)
+        continue
+      }
+      if (sequence.length === 0) continue
+      for (const args of sequence) {
+        await this.runXdotool(args)
+        await delay(this.typingKeyIntervalMs)
+      }
+    }
   }
 
   private async ensureEnvironment(): Promise<void> {
@@ -891,7 +992,7 @@ class ComputerSession {
         await this.performScroll(action.scroll_x, action.scroll_y)
         return
       case 'type':
-        await this.runXdotool(['type', '--delay', '40', '--', action.text])
+        await this.typeWithXdotool(action.text)
         return
       case 'wait':
         await delay(1000)
@@ -1459,7 +1560,7 @@ async function main() {
     .option('stealth', {
       type: 'boolean',
       default: false,
-      describe: 'Enable stealth browser patches (requires --automationDriver playwright).',
+      describe: 'Enable stealth browser patches (requires --automationDriver puppeteer or playwright).',
     })
     .option('displayWidth', { type: 'number', default: 1280 })
     .option('displayHeight', { type: 'number', default: 720 })
@@ -1498,7 +1599,7 @@ async function main() {
       default: 1000,
       describe: 'Delay in milliseconds after actions before capturing a screenshot (set to 0 to disable).',
     })
-    .option('actionScreenshots', {
+    .option('actionScreenshotMode', {
       type: 'string',
       choices: ['auto', 'manual'],
       default: 'auto',
@@ -1540,8 +1641,8 @@ async function main() {
       ? 'playwright'
       : 'puppeteer'
   const stealth = Boolean(argv.stealth)
-  if (stealth && automationDriver !== 'playwright') {
-    console.error('Error: --stealth requires --automationDriver playwright.')
+  if (stealth && !['playwright', 'puppeteer'].includes(automationDriver)) {
+    console.error('Error: --stealth requires --automationDriver puppeteer or playwright.')
     process.exit(1)
   }
   const postActionDelayMs =
@@ -1549,7 +1650,7 @@ async function main() {
       ? Math.max(0, argv.postActionDelayMs)
       : 1000
   const actionScreenshotMode: Config['actionScreenshotMode'] =
-    typeof argv.actionScreenshots === 'string' && argv.actionScreenshots.toLowerCase() === 'manual'
+    typeof argv.actionScreenshotMode === 'string' && argv.actionScreenshotMode.toLowerCase() === 'manual'
       ? 'manual'
       : 'auto'
   const chromePathArg = typeof argv.chromePath === 'string' && argv.chromePath.trim() ? argv.chromePath.trim() : undefined
