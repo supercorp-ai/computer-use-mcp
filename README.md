@@ -1,11 +1,13 @@
 # Computer Use MCP Server
 
-An MCP server that exposes a virtual browser session driven through computer-use actions. The server launches a Chromium instance via Puppeteer and captures screenshots after every action so an LLM client can reason about the UI it just manipulated. Optional MJPEG streaming endpoints allow a human to watch the live browser session.
+An MCP server that exposes a virtual browser session driven through computer-use actions. By default the server launches Chrome via [Rebrowser Puppeteer](https://github.com/rebrowser/rebrowser-patches) and captures screenshots after each action, giving an LLM client immediate visual feedback. Optional MJPEG/HLS streaming endpoints allow a human to watch the live browser session. A Playwright + [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-nodejs) path is also available for stealth-friendly sessions.
 
 ## Features
 
 - Supports the standard computer-use action set (click, double-click, drag, keypress, move, screenshot, scroll, type, wait).
 - Returns `computer_call_output` payloads with a screenshot embedded as a `data:image/png;base64,...` URI for each tool invocation.
+- Configurable post-action delay (`--postActionDelayMs`) and screenshot policy (`--actionScreenshotMode auto|manual`).
+- Multiple automation backends: Rebrowser Puppeteer (`--automationDriver puppeteer`) or Patchright Playwright (`--automationDriver playwright`). Add `--stealth` to opt into the vendor’s stealth patches.
 - Optional HLS streaming with a shared browser window; pass `--stream auto` to launch it automatically and `--stream functions` to expose `start_stream`, `get_stream`, and `stop_stream` MCP tools.
 - Works over stdio, SSE, or streamable HTTP transports.
 - Configurable viewport size, default URL, and multiple transport modes.
@@ -106,11 +108,21 @@ Options:
   --streamQuality <number>  Default JPEG quality for streaming (10–100, default: 80)
   --streamPath <path>       Route prefix for HLS streams (default: /streams)
   --stream <mode>           Enable streaming features (modes: auto, functions). Pass multiple times.
+  --streamTarget <mode>     Streaming back-end ("local" or "mediamtx", default: local)
+  --mtxRtspUrl <url>        RTSP publish URL when using MediaMTX
+  --mtxHlsUrl <url>         Optional HLS playback URL when using MediaMTX
+  --mtxFps <number>         MediaMTX stream FPS (default: 25)
+  --mtxBitrateK <number>    MediaMTX video bitrate in Kbps (default: 2500)
+  --audioSource <mode>      Audio source ("none", "anullsrc", or "pulse", default: anullsrc)
   --previewPath <path>      Mount the HTML preview page at the given path (requires --stream)
+  --automationDriver <drv>  "puppeteer" (default) or "playwright"
+  --stealth                 Enable the driver's stealth patches (works with puppeteer via Rebrowser or playwright via Patchright)
   --chromePath <path>       Chrome/Chromium executable launched by Puppeteer (default: bundled binary)
   --ffmpegPath <path>       ffmpeg binary used for display capture (default: ffmpeg)
   --xvfbPath <path>         Xvfb binary used for the virtual display (default: Xvfb)
   --displayStart <number>   Base X display number allocated to sessions (default: 90)
+  --postActionDelayMs <ms>  Delay (in milliseconds) after actions before capturing a screenshot (default: 1000)
+  --actionScreenshotMode    "auto" (default) captures every action; "manual" only captures explicit screenshot actions
   -h, --help                Show help
 ```
 
@@ -156,4 +168,4 @@ When you deploy behind a reverse proxy, set `--publicBaseUrl` so returned URLs a
 - `npm run lint` runs ESLint.
 - `npm start` launches the compiled server.
 
-The Puppeteer browser is launched on-demand per session and cleaned up when the process exits (SIGINT/SIGTERM).
+The browser session is launched on demand and cleaned up when the process exits (SIGINT/SIGTERM).
