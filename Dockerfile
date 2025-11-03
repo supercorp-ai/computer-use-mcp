@@ -21,5 +21,19 @@ RUN npm run build
 RUN npx --yes puppeteer browsers install chrome
 ENV CHROME_PATH=/usr/bin/google-chrome-stable
 
+# Create directories for Chrome user data and cache in container
+RUN mkdir -p /app/user-data /tmp/chrome-cache && \
+    chmod 777 /app/user-data /tmp/chrome-cache
+
+# Set Chrome policy for DuckDuckGo as default search (lighter than user-data-dir)
+RUN mkdir -p /etc/opt/chrome/policies/managed && \
+    echo '{ \
+      "DefaultSearchProviderEnabled": true, \
+      "DefaultSearchProviderName": "DuckDuckGo", \
+      "DefaultSearchProviderKeyword": "duckduckgo.com", \
+      "DefaultSearchProviderSearchURL": "https://duckduckgo.com/?q={searchTerms}", \
+      "DefaultSearchProviderSuggestURL": "https://duckduckgo.com/ac/?q={searchTerms}" \
+    }' > /etc/opt/chrome/policies/managed/default-search.json
+
 EXPOSE 8000
 ENTRYPOINT ["node", "dist/index.js"]

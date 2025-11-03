@@ -775,7 +775,9 @@ class ComputerSession {
     if (this.playwrightProfileDir) {
       return this.playwrightProfileDir
     }
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), `computer-mcp-playwright-${this.memoryKey}-`))
+    // Use /app/user-data in production (containers), /tmp locally
+    const baseDir = process.env.FLY_APP_NAME ? '/app/user-data' : os.tmpdir()
+    const dir = await fs.mkdtemp(path.join(baseDir, `computer-mcp-playwright-${this.memoryKey}-`))
     this.playwrightProfileDir = dir
     return dir
   }
@@ -784,7 +786,9 @@ class ComputerSession {
     if (this.puppeteerProfileDir) {
       return this.puppeteerProfileDir
     }
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), `computer-mcp-puppeteer-${this.memoryKey}-`))
+    // Use /app/user-data in production (containers), /tmp locally
+    const baseDir = process.env.FLY_APP_NAME ? '/app/user-data' : os.tmpdir()
+    const dir = await fs.mkdtemp(path.join(baseDir, `computer-mcp-puppeteer-${this.memoryKey}-`))
     this.puppeteerProfileDir = dir
     return dir
   }
@@ -881,6 +885,11 @@ class ComputerSession {
       )
     }
 
+    // Add disk cache dir for better container support
+    if (process.env.FLY_APP_NAME) {
+      args.push('--disk-cache-dir=/tmp/chrome-cache')
+    }
+
     const requiresNoSandbox = typeof process.geteuid === 'function' && process.geteuid() === 0
     if (requiresNoSandbox) {
       args.push('--no-sandbox')
@@ -896,45 +905,19 @@ class ComputerSession {
       const chromiumSandbox = typeof process.getuid === 'function' && process.getuid() === 0 ? false : undefined
 
       if (this.config.stealth) {
-        let context: PlaywrightBrowserContext
-        let userDataDir: string | undefined
-
-        try {
-          userDataDir = await this.ensurePlaywrightProfileDir()
-          await this.writeDefaultSearchPreferences(userDataDir)
-          context = await playwright.chromium.launchPersistentContext(userDataDir, {
-            headless: false,
-            executablePath: this.config.chromePath,
-            channel: this.config.chromePath ? undefined : 'chrome',
-            viewport: null,
-            chromiumSandbox,
-            env,
-            args,
-            ignoreDefaultArgs: ['--enable-automation'],
-            timeout: 30000,
-          })
-        } catch (err) {
-          console.warn(`[computer-mcp] (${this.memoryKey}) Failed to launch with user data dir, retrying without it (DuckDuckGo preferences will not be set):`, err instanceof Error ? err.message : String(err))
-          // Fallback: launch without persistent context
-          if (userDataDir && this.playwrightProfileDir) {
-            try {
-              await fs.rm(this.playwrightProfileDir, { recursive: true, force: true })
-            } catch {}
-            this.playwrightProfileDir = undefined
-          }
-
-          const userDataDirFallback = await this.ensurePlaywrightProfileDir()
-          context = await playwright.chromium.launchPersistentContext(userDataDirFallback, {
-            headless: false,
-            executablePath: this.config.chromePath,
-            channel: this.config.chromePath ? undefined : 'chrome',
-            viewport: null,
-            chromiumSandbox,
-            env,
-            args,
-            ignoreDefaultArgs: ['--enable-automation'],
-          })
-        }
+        // Stealth mode requires persistent context - DuckDuckGo set via Chrome policies (see Dockerfile)
+        const userDataDir = await this.ensurePlaywrightProfileDir()
+        const context = await playwright.chromium.launchPersistentContext(userDataDir, {
+          headless: false,
+          executablePath: this.config.chromePath,
+          channel: this.config.chromePath ? undefined : 'chrome',
+          viewport: null,
+          chromiumSandbox,
+          env,
+          args,
+          ignoreDefaultArgs: ['--enable-automation'],
+          timeout: 120000, // 120s timeout for testing Xvfb readiness
+        })
 
         const browser = context.browser()
         const pages = context.pages()
@@ -964,9 +947,8 @@ class ComputerSession {
         return
       }
 
+      // Non-stealth Playwright - DuckDuckGo set via Chrome policies (see Dockerfile)
       const userDataDir = await this.ensurePlaywrightProfileDir()
-      await this.writeDefaultSearchPreferences(userDataDir)
-
       const context = await playwright.chromium.launchPersistentContext(userDataDir, {
         headless: false,
         executablePath: this.config.chromePath,
@@ -976,6 +958,7 @@ class ComputerSession {
         env,
         args,
         ignoreDefaultArgs: ['--enable-automation'],
+        timeout: 120000, // 120s timeout for testing Xvfb readiness
       })
 
       const browser = context.browser()
@@ -1006,39 +989,16 @@ class ComputerSession {
       return
     }
 
-    let browser: PuppeteerBrowser
-    try {
-      const userDataDir = await this.ensurePuppeteerProfileDir()
-      await this.writeDefaultSearchPreferences(userDataDir)
-
-      browser = await puppeteer.launch({
-        headless: false,
-        executablePath: this.config.chromePath,
-        defaultViewport: null,
-        args: [...args, `--user-data-dir=${userDataDir}`],
-        ignoreDefaultArgs: ['--enable-automation'],
-        env: { ...process.env, DISPLAY: this.display.displayEnv },
-        timeout: 30000,
-      })
-    } catch (err) {
-      console.warn(`[computer-mcp] (${this.memoryKey}) Failed to launch with user data dir, retrying without it (DuckDuckGo preferences will not be set):`, err instanceof Error ? err.message : String(err))
-      // Fallback: launch without user data dir
-      if (this.puppeteerProfileDir) {
-        try {
-          await fs.rm(this.puppeteerProfileDir, { recursive: true, force: true })
-        } catch {}
-        this.puppeteerProfileDir = undefined
-      }
-
-      browser = await puppeteer.launch({
-        headless: false,
-        executablePath: this.config.chromePath,
-        defaultViewport: null,
-        args,
-        ignoreDefaultArgs: ['--enable-automation'],
-        env: { ...process.env, DISPLAY: this.display.displayEnv },
-      })
-    }
+    // Launch without user data dir - DuckDuckGo set via Chrome policies (see Dockerfile)
+    const browser = await puppeteer.launch({
+      headless: false,
+      executablePath: this.config.chromePath,
+      defaultViewport: null,
+      args,
+      ignoreDefaultArgs: ['--enable-automation'],
+      env: { ...process.env, DISPLAY: this.display.displayEnv },
+      timeout: 120000, // 120s timeout for testing Xvfb readiness
+    })
 
     this.browser = browser
     const pages = await browser.pages()
