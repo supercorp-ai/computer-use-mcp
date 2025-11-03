@@ -333,6 +333,7 @@ class ComputerSession {
   private page?: BrowserPage
   private playwrightContext?: PlaywrightBrowserContext
   private playwrightProfileDir?: string
+  private puppeteerProfileDir?: string
   private playwrightModule?: PlaywrightModule
   private playwrightLaunchLogged = false
   private readonly typingKeyIntervalMs = 12
@@ -386,6 +387,12 @@ class ComputerSession {
         try {
           await (this.page as PuppeteerPage | undefined)?.close()
         } catch {}
+        if (this.puppeteerProfileDir) {
+          try {
+            await fs.rm(this.puppeteerProfileDir, { recursive: true, force: true })
+          } catch {}
+          this.puppeteerProfileDir = undefined
+        }
       }
       this.page = undefined
       try {
@@ -773,6 +780,47 @@ class ComputerSession {
     return dir
   }
 
+  private async ensurePuppeteerProfileDir(): Promise<string> {
+    if (this.puppeteerProfileDir) {
+      return this.puppeteerProfileDir
+    }
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), `computer-mcp-puppeteer-${this.memoryKey}-`))
+    this.puppeteerProfileDir = dir
+    return dir
+  }
+
+  private async writeDefaultSearchPreferences(userDataDir: string): Promise<void> {
+    const defaultDir = path.join(userDataDir, 'Default')
+    await fs.mkdir(defaultDir, { recursive: true })
+
+    const preferencesPath = path.join(defaultDir, 'Preferences')
+
+    // Chrome Preferences structure for default search provider
+    const preferences = {
+      search: {
+        suggest_enabled: true
+      },
+      default_search_provider_data: {
+        template_url_data: {
+          short_name: 'DuckDuckGo',
+          keyword: 'duckduckgo.com',
+          url: 'https://duckduckgo.com/?q={searchTerms}',
+          suggestions_url: 'https://duckduckgo.com/ac/?q={searchTerms}',
+          favicon_url: 'https://duckduckgo.com/favicon.ico',
+          new_tab_url: 'https://duckduckgo.com/',
+          prepopulate_id: 92,
+          safe_for_autoreplace: true,
+          date_created: '13334258984390133',
+          last_modified: '13334258984390133',
+        }
+      },
+      homepage: 'https://duckduckgo.com/',
+      homepage_is_newtabpage: false,
+    }
+
+    await fs.writeFile(preferencesPath, JSON.stringify(preferences, null, 2))
+  }
+
   private async launchBrowser() {
     await this.display.start()
 
@@ -849,6 +897,7 @@ class ComputerSession {
 
       if (this.config.stealth) {
         const userDataDir = await this.ensurePlaywrightProfileDir()
+        await this.writeDefaultSearchPreferences(userDataDir)
         const context = await playwright.chromium.launchPersistentContext(userDataDir, {
           headless: false,
           executablePath: this.config.chromePath,
@@ -887,24 +936,25 @@ class ComputerSession {
         return
       }
 
-      const browser = await playwright.chromium.launch({
+      const userDataDir = await this.ensurePlaywrightProfileDir()
+      await this.writeDefaultSearchPreferences(userDataDir)
+
+      const context = await playwright.chromium.launchPersistentContext(userDataDir, {
         headless: false,
         executablePath: this.config.chromePath,
         channel: this.config.chromePath ? undefined : 'chrome',
-        args,
-        ignoreDefaultArgs: ['--enable-automation'],
+        viewport: null,
         chromiumSandbox,
         env,
+        args,
+        ignoreDefaultArgs: ['--enable-automation'],
       })
 
-      const context = await browser.newContext({
-        viewport: null,
-        deviceScaleFactor: 1,
-      })
+      const browser = context.browser()
+      const pages = context.pages()
+      const page = pages.length ? pages[0] : await context.newPage()
 
-      const page = await context.newPage()
-
-      this.browser = browser
+      this.browser = browser ?? (context as unknown as BrowserBackend)
       this.playwrightContext = context
       this.page = page
       if (!this.playwrightLaunchLogged) {
@@ -928,11 +978,14 @@ class ComputerSession {
       return
     }
 
+    const userDataDir = await this.ensurePuppeteerProfileDir()
+    await this.writeDefaultSearchPreferences(userDataDir)
+
     const browser = await puppeteer.launch({
       headless: false,
       executablePath: this.config.chromePath,
       defaultViewport: null,
-      args,
+      args: [...args, `--user-data-dir=${userDataDir}`],
       ignoreDefaultArgs: ['--enable-automation'],
       env: { ...process.env, DISPLAY: this.display.displayEnv },
     })
