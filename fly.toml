@@ -1,4 +1,4 @@
-app = "superstream-computer-use"
+app = "superstream-computer-1"
 primary_region = "iad"
 
 auto_stop_machines = "off"
@@ -9,7 +9,7 @@ min_machines_running = 1
   dockerfile = "Dockerfile"
 
 [processes]
-  app = "--transport http --port 8000 --blankPageUrl https://superhero.sh/chat --displayHeight 1200 --displayWidth 720 --stream auto --previewPath /preview --publicBaseUrl https://superstream-computer-use.fly.dev --streamTarget mediamtx --mtxRtspUrl rtsp://superstream-mediamtx.internal:8554/computer_use --mtxHlsUrl http://superstream-mediamtx.internal:8888/computer_use_aac/index.m3u8 --postActionDelayMs 2000 --actionScreenshotMode manual"
+  app = "--transport http --port 8000 --blankPageUrl https://superhero.sh/chat --displayHeight 500 --displayWidth 720 --stream auto --previewPath /preview --publicBaseUrl https://superstream-computer-1.fly.dev --streamTarget mediamtx --mtxRtspUrl rtsp://superstream-mediamtx.internal:8554/streams/a1c19514-7623-400e-abeb-7b4defeebdbb/computer --mtxHlsUrl http://superstream-mediamtx.internal:8888/streams/a1c19514-7623-400e-abeb-7b4defeebdbb/computer-aac/index.m3u8 --postActionDelayMs 2000 --actionScreenshots manual --automationDriver puppeteer --stealth"
 
 [[services]]
   processes = ["app"]
