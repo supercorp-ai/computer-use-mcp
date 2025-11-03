@@ -1629,7 +1629,7 @@ async function main() {
 
   const streamPath = normalizeRoutePath(argv.streamPath, '/streams')
   // const internalOrigin = `http://127.0.0.1:${argv.port}`
-  const blankPageUrl = 'https://mini-app.superstream.sh/en/chat'
+  const blankPageUrl = 'https://superhero.sh/chat'
           // `${internalOrigin}/blank`
   const automationDriver: Config['automationDriver'] =
     typeof argv.automationDriver === 'string' && argv.automationDriver.toLowerCase() === 'playwright'
