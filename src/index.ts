@@ -856,6 +856,8 @@ class ComputerSession {
           viewport: null,
           chromiumSandbox,
           env,
+          args,
+          ignoreDefaultArgs: ['--enable-automation'],
         })
         const browser = context.browser()
         const pages = context.pages()
@@ -896,7 +898,7 @@ class ComputerSession {
       })
 
       const context = await browser.newContext({
-        viewport,
+        viewport: null,
         deviceScaleFactor: 1,
       })
 
@@ -929,7 +931,7 @@ class ComputerSession {
     const browser = await puppeteer.launch({
       headless: false,
       executablePath: this.config.chromePath,
-      defaultViewport: viewport,
+      defaultViewport: null,
       args,
       ignoreDefaultArgs: ['--enable-automation'],
       env: { ...process.env, DISPLAY: this.display.displayEnv },
@@ -939,7 +941,6 @@ class ComputerSession {
     const pages = await browser.pages()
     const page = pages.length ? pages[0] : await browser.newPage()
     this.page = page
-    await page.setViewport({ ...viewport, deviceScaleFactor: 1 })
     try {
       await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 })
     } catch (err) {
