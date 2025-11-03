@@ -9,7 +9,7 @@ min_machines_running = 1
   dockerfile = "Dockerfile"
 
 [processes]
-  app = "--transport http --port 8000 --blankPageUrl https://superhero.sh/chat --displayHeight 500 --displayWidth 720 --stream auto --previewPath /preview --publicBaseUrl https://superstream-computer-1.fly.dev --streamTarget mediamtx --mtxRtspUrl rtsp://superstream-mediamtx.internal:8554/streams/c1c19514-7623-400e-abeb-7b4defeebdcc/computer --mtxHlsUrl http://superstream-mediamtx.internal:8888/streams/c1c19514-7623-400e-abeb-7b4defeebdcc/computer-aac/index.m3u8 --postActionDelayMs 2000 --actionScreenshots manual --automationDriver puppeteer --stealth"
+  app = "--transport http --port 8000 --blankPageUrl https://superhero.sh/chat --displayHeight 500 --displayWidth 720 --stream auto --previewPath /preview --publicBaseUrl https://superstream-computer-1.fly.dev --streamTarget mediamtx --mtxRtspUrl rtsp://superstream-mediamtx.internal:8554/streams/c19514-7623-400e-abeb-7b4defeebdcc/computer --mtxHlsUrl http://superstream-mediamtx.internal:8888/streams/c19514-7623-400e-abeb-7b4defeebdcc/computer-aac/index.m3u8 --postActionDelayMs 2000 --actionScreenshots manual --automationDriver puppeteer --stealth"
 
 [[services]]
   processes = ["app"]
