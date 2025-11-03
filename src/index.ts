@@ -896,18 +896,46 @@ class ComputerSession {
       const chromiumSandbox = typeof process.getuid === 'function' && process.getuid() === 0 ? false : undefined
 
       if (this.config.stealth) {
-        const userDataDir = await this.ensurePlaywrightProfileDir()
-        await this.writeDefaultSearchPreferences(userDataDir)
-        const context = await playwright.chromium.launchPersistentContext(userDataDir, {
-          headless: false,
-          executablePath: this.config.chromePath,
-          channel: this.config.chromePath ? undefined : 'chrome',
-          viewport: null,
-          chromiumSandbox,
-          env,
-          args,
-          ignoreDefaultArgs: ['--enable-automation'],
-        })
+        let context: PlaywrightBrowserContext
+        let userDataDir: string | undefined
+
+        try {
+          userDataDir = await this.ensurePlaywrightProfileDir()
+          await this.writeDefaultSearchPreferences(userDataDir)
+          context = await playwright.chromium.launchPersistentContext(userDataDir, {
+            headless: false,
+            executablePath: this.config.chromePath,
+            channel: this.config.chromePath ? undefined : 'chrome',
+            viewport: null,
+            chromiumSandbox,
+            env,
+            args,
+            ignoreDefaultArgs: ['--enable-automation'],
+            timeout: 30000,
+          })
+        } catch (err) {
+          console.warn(`[computer-mcp] (${this.memoryKey}) Failed to launch with user data dir, retrying without it (DuckDuckGo preferences will not be set):`, err instanceof Error ? err.message : String(err))
+          // Fallback: launch without persistent context
+          if (userDataDir && this.playwrightProfileDir) {
+            try {
+              await fs.rm(this.playwrightProfileDir, { recursive: true, force: true })
+            } catch {}
+            this.playwrightProfileDir = undefined
+          }
+
+          const userDataDirFallback = await this.ensurePlaywrightProfileDir()
+          context = await playwright.chromium.launchPersistentContext(userDataDirFallback, {
+            headless: false,
+            executablePath: this.config.chromePath,
+            channel: this.config.chromePath ? undefined : 'chrome',
+            viewport: null,
+            chromiumSandbox,
+            env,
+            args,
+            ignoreDefaultArgs: ['--enable-automation'],
+          })
+        }
+
         const browser = context.browser()
         const pages = context.pages()
         const page = pages.length ? pages[0] : await context.newPage()
@@ -978,17 +1006,39 @@ class ComputerSession {
       return
     }
 
-    const userDataDir = await this.ensurePuppeteerProfileDir()
-    await this.writeDefaultSearchPreferences(userDataDir)
+    let browser: PuppeteerBrowser
+    try {
+      const userDataDir = await this.ensurePuppeteerProfileDir()
+      await this.writeDefaultSearchPreferences(userDataDir)
 
-    const browser = await puppeteer.launch({
-      headless: false,
-      executablePath: this.config.chromePath,
-      defaultViewport: null,
-      args: [...args, `--user-data-dir=${userDataDir}`],
-      ignoreDefaultArgs: ['--enable-automation'],
-      env: { ...process.env, DISPLAY: this.display.displayEnv },
-    })
+      browser = await puppeteer.launch({
+        headless: false,
+        executablePath: this.config.chromePath,
+        defaultViewport: null,
+        args: [...args, `--user-data-dir=${userDataDir}`],
+        ignoreDefaultArgs: ['--enable-automation'],
+        env: { ...process.env, DISPLAY: this.display.displayEnv },
+        timeout: 30000,
+      })
+    } catch (err) {
+      console.warn(`[computer-mcp] (${this.memoryKey}) Failed to launch with user data dir, retrying without it (DuckDuckGo preferences will not be set):`, err instanceof Error ? err.message : String(err))
+      // Fallback: launch without user data dir
+      if (this.puppeteerProfileDir) {
+        try {
+          await fs.rm(this.puppeteerProfileDir, { recursive: true, force: true })
+        } catch {}
+        this.puppeteerProfileDir = undefined
+      }
+
+      browser = await puppeteer.launch({
+        headless: false,
+        executablePath: this.config.chromePath,
+        defaultViewport: null,
+        args,
+        ignoreDefaultArgs: ['--enable-automation'],
+        env: { ...process.env, DISPLAY: this.display.displayEnv },
+      })
+    }
 
     this.browser = browser
     const pages = await browser.pages()
