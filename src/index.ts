@@ -81,6 +81,10 @@ type RtspPublisher = {
   process: ChildProcess
   rtspUrl: string
   opts: { fps: number; bitrateK: number; audioSource: 'none'|'anullsrc'|'pulse' }
+  lastActivity: number
+  heartbeatInterval?: NodeJS.Timeout
+  restartCount: number
+  lastRestartTime: number
 }
 
 interface ServerContext {
@@ -587,24 +591,86 @@ class ComputerSession {
 
     const env = { ...process.env, DISPLAY: this.display.displayEnv }
     const proc = spawn(this.config.ffmpegPath, ffArgs, { env, stdio: ['ignore','pipe','pipe'] })
+
+    const now = Date.now()
+    const publisher: RtspPublisher = {
+      process: proc,
+      rtspUrl,
+      opts,
+      lastActivity: now,
+      restartCount: 0,
+      lastRestartTime: now,
+    }
+
+    // Monitor stderr for errors (use console.error so it shows in production)
     proc.stderr?.on('data', d => {
       const t = d.toString().trim()
-      if (t) console.debug(`[computer-mcp] ffmpeg (rtsp) ${t}`)
-    })
-    proc.on('exit', (code, signal) => {
-      console.error(`[computer-mcp] ffmpeg (rtsp) exited (code=${code ?? 'n/a'}, signal=${signal ?? 'n/a'})`)
-      if (this.rtsp?.process === proc) this.rtsp = undefined
+      if (t) {
+        console.error(`[computer-mcp] (${this.memoryKey}) ffmpeg rtsp stderr: ${t}`)
+        publisher.lastActivity = Date.now()
+      }
     })
 
-    this.rtsp = { process: proc, rtspUrl, opts }
+    // Monitor stdout
+    proc.stdout?.on('data', () => {
+      publisher.lastActivity = Date.now()
+    })
+
+    // Handle process exit with auto-restart
+    proc.on('exit', (code, signal) => {
+      console.error(`[computer-mcp] (${this.memoryKey}) ffmpeg rtsp exited (code=${code ?? 'n/a'}, signal=${signal ?? 'n/a'})`)
+
+      if (this.rtsp?.process === proc) {
+        clearInterval(this.rtsp.heartbeatInterval)
+        this.rtsp = undefined
+
+        // Auto-restart logic with backoff
+        const timeSinceLastRestart = Date.now() - publisher.lastRestartTime
+        const shouldRestart = publisher.restartCount < 5 || timeSinceLastRestart > 60000 // Reset count after 1min
+
+        if (shouldRestart) {
+          const restartDelay = Math.min(1000 * Math.pow(2, publisher.restartCount), 30000) // Exponential backoff, max 30s
+          console.warn(`[computer-mcp] (${this.memoryKey}) Restarting ffmpeg rtsp in ${restartDelay}ms (attempt ${publisher.restartCount + 1})`)
+
+          setTimeout(() => {
+            this.ensureRtspPublisher(rtspUrl, opts).catch(err => {
+              console.error(`[computer-mcp] (${this.memoryKey}) Failed to restart ffmpeg rtsp:`, err)
+            })
+          }, restartDelay)
+        } else {
+          console.error(`[computer-mcp] (${this.memoryKey}) ffmpeg rtsp exceeded restart limit (5 attempts), giving up`)
+        }
+      }
+    })
+
+    // Heartbeat monitor: detect hung streams (no activity for 30s)
+    const heartbeatInterval = setInterval(() => {
+      const timeSinceActivity = Date.now() - publisher.lastActivity
+      if (timeSinceActivity > 30000) {
+        console.error(`[computer-mcp] (${this.memoryKey}) ffmpeg rtsp appears hung (no activity for ${Math.round(timeSinceActivity/1000)}s), restarting...`)
+        clearInterval(heartbeatInterval)
+        try {
+          proc.kill('SIGKILL') // Force kill hung process
+        } catch (err) {
+          console.error(`[computer-mcp] (${this.memoryKey}) Error killing hung ffmpeg:`, err)
+        }
+      }
+    }, 10000) // Check every 10s
+
+    publisher.heartbeatInterval = heartbeatInterval
+    this.rtsp = publisher
+
+    console.log(`[computer-mcp] (${this.memoryKey}) ffmpeg rtsp publisher started (${opts.fps}fps, ${opts.bitrateK}kbps)`)
   }
 
   async stopRtspPublisher() {
     const pub = this.rtsp
     if (!pub) return
     this.rtsp = undefined
+    if (pub.heartbeatInterval) clearInterval(pub.heartbeatInterval)
     try { pub.process.kill('SIGTERM') } catch {}
     try { await once(pub.process, 'exit') } catch {}
+    console.log(`[computer-mcp] (${this.memoryKey}) ffmpeg rtsp publisher stopped`)
   }
 
   async ensureHlsRecorder(dir: string, options: { fps: number; quality: number }): Promise<void> {
