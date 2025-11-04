@@ -646,6 +646,10 @@ class ComputerSession {
     // Heartbeat monitor: detect hung streams (no activity for 30s)
     const heartbeatInterval = setInterval(() => {
       const timeSinceActivity = Date.now() - publisher.lastActivity
+
+      // Log every heartbeat tick (every 10s)
+      console.log(`[computer-mcp] (${this.memoryKey}) ffmpeg rtsp heartbeat: alive (last activity ${Math.round(timeSinceActivity/1000)}s ago)`)
+
       if (timeSinceActivity > 30000) {
         console.error(`[computer-mcp] (${this.memoryKey}) ffmpeg rtsp appears hung (no activity for ${Math.round(timeSinceActivity/1000)}s), restarting...`)
         clearInterval(heartbeatInterval)
