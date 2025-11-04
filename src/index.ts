@@ -81,7 +81,6 @@ type RtspPublisher = {
   process: ChildProcess
   rtspUrl: string
   opts: { fps: number; bitrateK: number; audioSource: 'none'|'anullsrc'|'pulse' }
-  lastActivity: number
   heartbeatInterval?: NodeJS.Timeout
   restartCount: number
   lastRestartTime: number
@@ -597,23 +596,25 @@ class ComputerSession {
       process: proc,
       rtspUrl,
       opts,
-      lastActivity: now,
       restartCount: 0,
       lastRestartTime: now,
     }
 
     // Monitor stderr for errors (use console.error so it shows in production)
+    // NOTE: FFmpeg is silent during normal streaming, stderr only has errors
     proc.stderr?.on('data', d => {
       const t = d.toString().trim()
       if (t) {
         console.error(`[computer-mcp] (${this.memoryKey}) ffmpeg rtsp stderr: ${t}`)
-        publisher.lastActivity = Date.now()
       }
     })
 
-    // Monitor stdout
-    proc.stdout?.on('data', () => {
-      publisher.lastActivity = Date.now()
+    // Monitor stdout (rarely used by ffmpeg)
+    proc.stdout?.on('data', d => {
+      const t = d.toString().trim()
+      if (t) {
+        console.log(`[computer-mcp] (${this.memoryKey}) ffmpeg rtsp stdout: ${t}`)
+      }
     })
 
     // Handle process exit with auto-restart
@@ -643,23 +644,14 @@ class ComputerSession {
       }
     })
 
-    // Heartbeat monitor: detect hung streams (no activity for 30s)
+    // Heartbeat monitor: just log that stream is running
+    // NOTE: We don't kill on silence because FFmpeg is normally silent during healthy streaming!
     const heartbeatInterval = setInterval(() => {
-      const timeSinceActivity = Date.now() - publisher.lastActivity
-
-      // Log every heartbeat tick (every 10s)
-      console.log(`[computer-mcp] (${this.memoryKey}) ffmpeg rtsp heartbeat: alive (last activity ${Math.round(timeSinceActivity/1000)}s ago)`)
-
-      if (timeSinceActivity > 30000) {
-        console.error(`[computer-mcp] (${this.memoryKey}) ffmpeg rtsp appears hung (no activity for ${Math.round(timeSinceActivity/1000)}s), restarting...`)
-        clearInterval(heartbeatInterval)
-        try {
-          proc.kill('SIGKILL') // Force kill hung process
-        } catch (err) {
-          console.error(`[computer-mcp] (${this.memoryKey}) Error killing hung ffmpeg:`, err)
-        }
+      // Check if process is still running
+      if (proc.exitCode === null && !proc.killed) {
+        console.log(`[computer-mcp] (${this.memoryKey}) ffmpeg rtsp heartbeat: streaming (pid=${proc.pid})`)
       }
-    }, 10000) // Check every 10s
+    }, 30000) // Check every 30s
 
     publisher.heartbeatInterval = heartbeatInterval
     this.rtsp = publisher
