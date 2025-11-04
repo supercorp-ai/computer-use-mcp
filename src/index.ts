@@ -1888,10 +1888,15 @@ async function main() {
   let httpServer: Server | undefined
   const sockets = new Set<Socket>()
   let shuttingDown = false
+  let sessionCleanupInterval: NodeJS.Timeout | undefined
 
   const cleanup = async () => {
     if (shuttingDown) return
     shuttingDown = true
+    if (sessionCleanupInterval) {
+      clearInterval(sessionCleanupInterval)
+      sessionCleanupInterval = undefined
+    }
     await streamManager.stopAll()
     await sessionManager.closeAll()
     if (httpServer) {
@@ -1965,10 +1970,30 @@ async function main() {
     interface HttpSession {
       server: McpServer
       transport: StreamableHTTPServerTransport
+      lastActivity: number
     }
 
     const sessions = new Map<string, HttpSession>()
     const eventStore = new InMemoryEventStore()
+
+    // Session cleanup: remove inactive sessions every minute
+    const SESSION_TIMEOUT_MS = 60 * 60 * 1000 // 1 hour
+    sessionCleanupInterval = setInterval(() => {
+      const now = Date.now()
+      const toDelete: string[] = []
+      for (const [sessionId, session] of sessions.entries()) {
+        if (now - session.lastActivity > SESSION_TIMEOUT_MS) {
+          toDelete.push(sessionId)
+        }
+      }
+      for (const sessionId of toDelete) {
+        sessions.delete(sessionId)
+        console.log(`[computer-mcp] Session ${sessionId} expired (inactive for 1h)`)
+      }
+      if (toDelete.length > 0) {
+        console.log(`[computer-mcp] Cleaned up ${toDelete.length} expired sessions (${sessions.size} remaining)`)
+      }
+    }, 60000) // Check every minute
 
     app.post('/', async (req: Request, res: ExpressResponse) => {
       try {
@@ -1979,8 +2004,9 @@ async function main() {
         })
         if (sessionId && sessions.has(sessionId)) {
           logHttpEvent(req, 'using existing session', { sessionId })
-          const { transport } = sessions.get(sessionId)!
-          await transport.handleRequest(req, res)
+          const session = sessions.get(sessionId)!
+          session.lastActivity = Date.now() // Update activity timestamp
+          await session.transport.handleRequest(req, res)
           return
         }
 
@@ -1993,7 +2019,7 @@ async function main() {
           sessionIdGenerator: () => sessionId ?? randomUUID(),
           eventStore,
           onsessioninitialized: (newId: string) => {
-            sessions.set(newId, { server, transport })
+            sessions.set(newId, { server, transport, lastActivity: Date.now() })
             console.log(`[computer-mcp] [${newId}] HTTP session initialized (shared)`)
           },
         })
@@ -2054,9 +2080,10 @@ async function main() {
         return
       }
       try {
-        const { transport } = sessions.get(sessionId)!
+        const session = sessions.get(sessionId)!
+        session.lastActivity = Date.now() // Update activity timestamp
         logHttpEvent(req, 'GET / streaming response', { sessionId })
-        await transport.handleRequest(req, res)
+        await session.transport.handleRequest(req, res)
       } catch (err) {
         logHttpEvent(req, 'GET / handler failed', {
           sessionId,
