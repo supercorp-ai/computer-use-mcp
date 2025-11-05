@@ -263,7 +263,39 @@ test('loose mode applies scroll_direction and amount hints', () => {
   assert.equal(action.x, 352)
   assert.equal(action.y, 400)
   assert.equal(action.scroll_x, 0)
-  assert.equal(action.scroll_y, 360)
+  assert.equal(action.scroll_y, 3)
+})
+
+test('loose mode interprets large scroll_amount as pixels', () => {
+  const action = parseActionInput(
+    {
+      type: 'scroll',
+      coordinate: [360, 400],
+      scroll_direction: 'down',
+      scroll_amount: 400,
+    },
+    'loose'
+  )
+  if (action.type !== 'scroll') {
+    throw new Error('expected scroll action')
+  }
+  assert.equal(action.scroll_y, 400)
+})
+
+test('loose mode allows very large scroll_amount values', () => {
+  const action = parseActionInput(
+    {
+      type: 'scroll',
+      coordinate: [360, 400],
+      scroll_direction: 'down',
+      scroll_amount: 9999,
+    },
+    'loose'
+  )
+  if (action.type !== 'scroll') {
+    throw new Error('expected scroll action')
+  }
+  assert.equal(action.scroll_y, 9999)
 })
 
 test('loose mode applies horizontal scroll direction hints', () => {
@@ -282,7 +314,7 @@ test('loose mode applies horizontal scroll direction hints', () => {
   if (action.type !== 'scroll') {
     throw new Error('expected scroll action')
   }
-  assert.equal(action.scroll_x, -240)
+  assert.equal(action.scroll_x, -2)
   assert.equal(action.scroll_y, 0)
 })
 
@@ -300,6 +332,11 @@ test('strict mode rejects unknown action type', () => {
 
 test('strict mode rejects click aliases', () => {
   assert.throws(() => parseActionInput({ type: 'left_click', x: 1, y: 2 }, 'strict'))
+})
+
+test('strict mode rejects direction-only scroll hint', () => {
+  assert.throws(() => parseActionInput({ type: 'scroll', direction: 'down' }, 'strict'))
+  assert.throws(() => parseActionInput({ type: 'scroll', scroll_direction: 'down' }, 'strict'))
 })
 
 test('strict mode rejects triple_click', () => {

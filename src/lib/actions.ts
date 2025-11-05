@@ -339,18 +339,16 @@ function normalizeLooseAction(input: Record<string, unknown>): ComputerAction {
         input.scroll_count ??
         input.scrollCount
 
-      let scrollAmount = 1
+      let amountMagnitude: number | undefined
       if (scrollAmountRaw !== undefined) {
-        const numericAmount = coerceNumber(scrollAmountRaw, 'scroll_amount')
-        if (numericAmount === 0) {
-          scrollAmount = 0
-        } else if (Number.isFinite(numericAmount)) {
-          scrollAmount = Math.max(1, Math.round(Math.abs(numericAmount)))
+        const numericAmount = Math.abs(coerceNumber(scrollAmountRaw, 'scroll_amount'))
+        if (Number.isFinite(numericAmount)) {
+          amountMagnitude = numericAmount
         }
       }
 
       if (direction && scroll_x === 0 && scroll_y === 0) {
-        const baseMagnitude = 120 * scrollAmount
+        const baseMagnitude = amountMagnitude !== undefined ? amountMagnitude : 120
         switch (direction) {
           case 'up':
           case 'upwards':
