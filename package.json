@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
+    "test:compile": "node -e \"require('fs').rmSync('dist-test', { recursive: true, force: true })\" && tsc --project tsconfig.test.json",
+    "test": "npm run test:compile && node --test \"dist-test/test/**/*.test.js\"",
     "lint": "eslint . --ext .ts",
     "lint:fix": "eslint . --ext .ts --fix",
     "start": "node dist/index.js",

@@ -22,6 +22,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
+import { actionSchema, ComputerAction, looseActionInputSchema, ToolSchemaMode } from './lib/actions.js'
 
 // -----------------------------------------------------------------------------
 // Configuration Types
@@ -43,6 +44,7 @@ interface Config {
   headless: boolean
   defaultUrl?: string
   toolsPrefix: string
+  toolSchema: ToolSchemaMode
   publicBaseUrl?: string
   streamPath: string
   streamDefaults: { fps: number; quality: number }
@@ -174,73 +176,6 @@ class VirtualDisplay {
 }
 
 // -----------------------------------------------------------------------------
-// Schemas for Computer Use actions
-// -----------------------------------------------------------------------------
-const clickActionSchema = z.object({
-  type: z.literal('click'),
-  x: z.number(),
-  y: z.number(),
-  button: z.enum(['left', 'right', 'wheel', 'back', 'forward']),
-})
-
-const doubleClickActionSchema = z.object({
-  type: z.literal('double_click'),
-  x: z.number(),
-  y: z.number(),
-})
-
-const dragActionSchema = z.object({
-  type: z.literal('drag'),
-  path: z.array(z.object({ x: z.number(), y: z.number() })).min(1),
-})
-
-const keyPressActionSchema = z.object({
-  type: z.literal('keypress'),
-  keys: z.array(z.string()).min(1),
-})
-
-const moveActionSchema = z.object({
-  type: z.literal('move'),
-  x: z.number(),
-  y: z.number(),
-})
-
-const screenshotActionSchema = z.object({
-  type: z.literal('screenshot'),
-})
-
-const scrollActionSchema = z.object({
-  type: z.literal('scroll'),
-  x: z.number(),
-  y: z.number(),
-  scroll_x: z.number(),
-  scroll_y: z.number(),
-})
-
-const typeActionSchema = z.object({
-  type: z.literal('type'),
-  text: z.string(),
-})
-
-const waitActionSchema = z.object({
-  type: z.literal('wait'),
-})
-
-const actionSchema = z.discriminatedUnion('type', [
-  clickActionSchema,
-  doubleClickActionSchema,
-  dragActionSchema,
-  keyPressActionSchema,
-  moveActionSchema,
-  screenshotActionSchema,
-  scrollActionSchema,
-  typeActionSchema,
-  waitActionSchema,
-])
-
-type ComputerAction = z.infer<typeof actionSchema>
-
-// -----------------------------------------------------------------------------
 // Utility helpers
 // -----------------------------------------------------------------------------
 const XDOToolKeyAliases: Record<string, string> = {
@@ -303,7 +238,7 @@ function resolveBaseUrl(config: Config): string {
   return `http://localhost:${config.port}`
 }
 
-function humanActionSummary(action: z.infer<typeof actionSchema>): string {
+function humanActionSummary(action: ComputerAction): string {
   switch (action.type) {
     case 'click':
       return `click ${action.button} at (${action.x}, ${action.y})`
@@ -1076,7 +1011,7 @@ class ComputerSession {
     } catch {}
   }
 
-  private async applyAction(_page: BrowserPage | undefined, action: z.infer<typeof actionSchema>) {
+  private async applyAction(_page: BrowserPage | undefined, action: ComputerAction) {
     switch (action.type) {
       case 'click':
         await this.moveSystemPointer(action.x, action.y)
@@ -1430,32 +1365,45 @@ function createComputerUseServer(context: ServerContext): McpServer {
     version: '1.0.0',
   })
 
-  server.registerTool(
-    `${config.toolsPrefix}call`,
-    {
-      description: 'Perform an action on the virtual computer and return a screenshot.',
-      inputSchema: { action: actionSchema },
-    },
-    async ({ action }) => {
-      console.log(`[computer-mcp] action -> ${humanActionSummary(action)}`)
-      const session = sessionManager.get()
-      const result = await session.perform(action)
+  const handleComputerCall = async ({ action }: { action: ComputerAction }) => {
+    console.log(`[computer-mcp] action -> ${humanActionSummary(action)}`)
+    const session = sessionManager.get()
+    const result = await session.perform(action)
 
-      if (!result.screenshot) {
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: 'Done.',
-            },
-          ],
-        }
+    if (!result.screenshot) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'Done.',
+          },
+        ],
       }
-
-      const base64Image = result.screenshot.buffer.toString('base64')
-      return buildComputerCallResult(action, base64Image, result.screenshot.contentType, config.imageOutputFormat)
     }
-  )
+
+    const base64Image = result.screenshot.buffer.toString('base64')
+    return buildComputerCallResult(action, base64Image, result.screenshot.contentType, config.imageOutputFormat)
+  }
+
+  if (config.toolSchema === 'strict') {
+    server.registerTool(
+      `${config.toolsPrefix}call`,
+      {
+        description: 'Perform an action on the virtual computer and return a screenshot.',
+        inputSchema: { action: actionSchema },
+      },
+      handleComputerCall
+    )
+  } else {
+    server.registerTool(
+      `${config.toolsPrefix}call`,
+      {
+        description: 'Perform an action on the virtual computer and return a screenshot.',
+        inputSchema: { action: looseActionInputSchema },
+      },
+      handleComputerCall
+    )
+  }
 
   if (config.streamFunctions) {
     server.tool(
@@ -1689,6 +1637,12 @@ async function main() {
     .option('headless', { type: 'boolean', default: false })
     .option('defaultUrl', { type: 'string' })
     .option('toolsPrefix', { type: 'string', default: 'computer_' })
+    .option('toolSchema', {
+      type: 'string',
+      choices: ['strict', 'loose'],
+      default: 'strict',
+      describe: 'Validation mode for tool input. Use loose to auto-correct common mistakes.',
+    })
     .option('publicBaseUrl', { type: 'string' })
     .option('streamFps', { type: 'number', default: 2 })
     .option('streamQuality', { type: 'number', default: 80 })
@@ -1774,6 +1728,10 @@ async function main() {
     typeof argv.actionScreenshotMode === 'string' && argv.actionScreenshotMode.toLowerCase() === 'manual'
       ? 'manual'
       : 'auto'
+  const toolSchema: ToolSchemaMode =
+    typeof argv.toolSchema === 'string' && argv.toolSchema.toLowerCase() === 'loose'
+      ? 'loose'
+      : 'strict'
   const chromePathArg = typeof argv.chromePath === 'string' && argv.chromePath.trim() ? argv.chromePath.trim() : undefined
   const envChromePath = typeof process.env.CHROME_PATH === 'string' && process.env.CHROME_PATH.trim()
     ? process.env.CHROME_PATH.trim()
@@ -1820,6 +1778,7 @@ async function main() {
     headless: argv.headless,
     defaultUrl: argv.defaultUrl,
     toolsPrefix: argv.toolsPrefix ?? 'computer_',
+    toolSchema,
     publicBaseUrl: argv.publicBaseUrl,
     streamPath,
     streamDefaults: {
@@ -1855,6 +1814,7 @@ async function main() {
     headless: config.headless,
     defaultUrl: config.defaultUrl,
     toolsPrefix: config.toolsPrefix,
+    toolSchema: config.toolSchema,
     postActionDelayMs: config.postActionDelayMs,
     actionScreenshotMode: config.actionScreenshotMode,
     streamEnabled: config.streamEnabled,
