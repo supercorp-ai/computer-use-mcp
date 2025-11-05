@@ -102,6 +102,99 @@ test('loose mode pulls type payload from value field', () => {
   assert.equal(action.text, 'hello world')
 })
 
+test('loose mode accepts keypress array with End key', () => {
+  const action = parseActionInput({ type: 'keypress', keys: ['End'] }, 'loose')
+  if (action.type !== 'keypress') {
+    throw new Error('expected keypress action')
+  }
+  assert.deepEqual(action.keys, ['End'])
+})
+
+test('loose mode accepts keypress array with return key', () => {
+  const action = parseActionInput({ type: 'keypress', keys: ['return'] }, 'loose')
+  if (action.type !== 'keypress') {
+    throw new Error('expected keypress action')
+  }
+  assert.deepEqual(action.keys, ['return'])
+})
+
+test('loose mode accepts keypress array with modifier chord', () => {
+  const action = parseActionInput({ type: 'keypress', keys: ['ctrl', 'a'] }, 'loose')
+  if (action.type !== 'keypress') {
+    throw new Error('expected keypress action')
+  }
+  assert.deepEqual(action.keys, ['ctrl', 'a'])
+})
+
+test('loose mode accepts keypress array with page_down alias', () => {
+  const action = parseActionInput({ type: 'keypress', keys: ['page_down'] }, 'loose')
+  if (action.type !== 'keypress') {
+    throw new Error('expected keypress action')
+  }
+  assert.deepEqual(action.keys, ['page_down'])
+})
+
+test('loose mode accepts keypress array with Home key', () => {
+  const action = parseActionInput({ type: 'keypress', keys: ['Home'] }, 'loose')
+  if (action.type !== 'keypress') {
+    throw new Error('expected keypress action')
+  }
+  assert.deepEqual(action.keys, ['Home'])
+})
+
+test('loose mode accepts keypress array with Page_Down key', () => {
+  const action = parseActionInput({ type: 'keypress', keys: ['Page_Down'] }, 'loose')
+  if (action.type !== 'keypress') {
+    throw new Error('expected keypress action')
+  }
+  assert.deepEqual(action.keys, ['Page_Down'])
+})
+
+test('loose mode splits space-delimited key text', () => {
+  const action = parseActionInput({ type: 'key', text: 'Down Down Down Down Down' }, 'loose')
+  if (action.type !== 'keypress') {
+    throw new Error('expected keypress action')
+  }
+  assert.deepEqual(action.keys, ['Down', 'Down', 'Down', 'Down', 'Down'])
+})
+
+test('loose mode accepts single return key text', () => {
+  const action = parseActionInput({ type: 'key', text: 'Return' }, 'loose')
+  if (action.type !== 'keypress') {
+    throw new Error('expected keypress action')
+  }
+  assert.deepEqual(action.keys, ['Return'])
+})
+
+test('loose mode accepts click coordinate array alias', () => {
+  const action = parseActionInput({ type: 'left_click', coordinate: [650, 126] }, 'loose')
+  if (action.type !== 'click') {
+    throw new Error('expected click action')
+  }
+  assert.equal(action.button, 'left')
+  assert.equal(action.x, 650)
+  assert.equal(action.y, 126)
+})
+
+test('loose mode derives scroll direction when deltas missing', () => {
+  const action = parseActionInput(
+    {
+      type: 'scroll',
+      x: 0,
+      y: 0,
+      scroll_x: 0,
+      scroll_y: 0,
+      direction: 'down',
+    },
+    'loose'
+  )
+  if (action.type !== 'scroll') {
+    throw new Error('expected scroll action')
+  }
+  assert.equal(action.scroll_x, 0)
+  assert.equal(action.scroll_y, 120)
+})
+
 test('loose mode throws for unsupported action types', () => {
   assert.throws(() => parseActionInput({ type: 'triple_click', x: 5, y: 10 }, 'loose'))
 })

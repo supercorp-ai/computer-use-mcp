@@ -162,6 +162,46 @@ function coercePoint(value: unknown, index: number): { x: number; y: number } {
   throw new Error(`Expected path[${index}] to contain point coordinates`)
 }
 
+function coerceCoordinate(value: unknown): { x: number; y: number } {
+  if (Array.isArray(value) && value.length >= 2) {
+    const [x, y] = value
+    return { x: coerceNumber(x, 'x'), y: coerceNumber(y, 'y') }
+  }
+  if (typeof value === 'object' && value !== null) {
+    const point = value as Record<string, unknown>
+    const x = coerceNumber(point.x ?? point.X ?? point[0], 'x')
+    const y = coerceNumber(point.y ?? point.Y ?? point[1], 'y')
+    return { x, y }
+  }
+  throw new Error('Coordinates must include x and y values')
+}
+
+function resolveCoordinates(
+  input: Record<string, unknown>,
+  fallback: unknown,
+  { requireBoth = true, defaultX, defaultY }: { requireBoth?: boolean; defaultX?: number; defaultY?: number } = {}
+): { x: number; y: number } {
+  const xRaw = input.x ?? input.X
+  const yRaw = input.y ?? input.Y
+  let x = xRaw !== undefined ? coerceNumber(xRaw, 'x') : undefined
+  let y = yRaw !== undefined ? coerceNumber(yRaw, 'y') : undefined
+
+  if ((x === undefined || y === undefined) && fallback !== undefined) {
+    const point = coerceCoordinate(fallback)
+    if (x === undefined) x = point.x
+    if (y === undefined) y = point.y
+  }
+
+  if (x === undefined) x = defaultX
+  if (y === undefined) y = defaultY
+
+  if (requireBoth && (x === undefined || y === undefined)) {
+    throw new Error('Coordinates must include both x and y')
+  }
+
+  return { x: x ?? 0, y: y ?? 0 }
+}
+
 function normalizeLooseAction(input: Record<string, unknown>): ComputerAction {
   const typeRaw = typeof input.type === 'string' ? input.type.trim() : ''
   if (!typeRaw) {
@@ -177,8 +217,13 @@ function normalizeLooseAction(input: Record<string, unknown>): ComputerAction {
     case 'rightclick':
     case 'middle_click':
     case 'middleclick': {
-      const x = coerceNumber(input.x ?? input.X, 'x')
-      const y = coerceNumber(input.y ?? input.Y, 'y')
+      const coordinateSource =
+        input.coordinate ??
+        input.coordinates ??
+        input.position ??
+        input.pos ??
+        input.point
+      const { x, y } = resolveCoordinates(input, coordinateSource, { requireBoth: true })
       const providedButton = coerceButton(input.button ?? input.Button)
       const defaultButton = CLICK_TYPE_DEFAULTS[type] ?? 'left'
       const button = providedButton ?? defaultButton
@@ -186,8 +231,13 @@ function normalizeLooseAction(input: Record<string, unknown>): ComputerAction {
     }
     case 'double_click':
     case 'doubleclick': {
-      const x = coerceNumber(input.x ?? input.X, 'x')
-      const y = coerceNumber(input.y ?? input.Y, 'y')
+      const coordinateSource =
+        input.coordinate ??
+        input.coordinates ??
+        input.position ??
+        input.pos ??
+        input.point
+      const { x, y } = resolveCoordinates(input, coordinateSource, { requireBoth: true })
       return actionSchema.parse({ type: 'double_click', x, y })
     }
     case 'drag': {
@@ -230,17 +280,47 @@ function normalizeLooseAction(input: Record<string, unknown>): ComputerAction {
     case 'scroll':
     case 'mouse_scroll':
     case 'wheel': {
-      const x = coerceNumber(input.x ?? input.X, 'x')
-      const y = coerceNumber(input.y ?? input.Y, 'y')
-      const scrollX = coerceNumber(
-        input.scroll_x ?? input.scrollX ?? input.delta_x ?? input.deltaX ?? input.dx,
-        'scroll_x'
-      )
-      const scrollY = coerceNumber(
-        input.scroll_y ?? input.scrollY ?? input.delta_y ?? input.deltaY ?? input.dy,
-        'scroll_y'
-      )
-      return actionSchema.parse({ type: 'scroll', x, y, scroll_x: scrollX, scroll_y: scrollY })
+      const coordinateSource =
+        input.coordinate ??
+        input.coordinates ??
+        input.position ??
+        input.pos ??
+        input.point
+      const { x, y } = resolveCoordinates(input, coordinateSource, {
+        requireBoth: false,
+        defaultX: 0,
+        defaultY: 0,
+      })
+
+      const scrollXRaw =
+        input.scroll_x ?? input.scrollX ?? input.delta_x ?? input.deltaX ?? input.dx
+      const scrollYRaw =
+        input.scroll_y ?? input.scrollY ?? input.delta_y ?? input.deltaY ?? input.dy
+
+      let scroll_x =
+        scrollXRaw !== undefined ? coerceNumber(scrollXRaw, 'scroll_x') : 0
+      let scroll_y =
+        scrollYRaw !== undefined ? coerceNumber(scrollYRaw, 'scroll_y') : 0
+
+      const direction =
+        typeof input.direction === 'string' ? input.direction.trim().toLowerCase() : undefined
+      if (direction && scroll_x === 0 && scroll_y === 0) {
+        switch (direction) {
+          case 'up':
+            scroll_y = -120
+            break
+          case 'down':
+            scroll_y = 120
+            break
+          case 'left':
+            scroll_x = -120
+            break
+          case 'right':
+            scroll_x = 120
+            break
+        }
+      }
+      return actionSchema.parse({ type: 'scroll', x, y, scroll_x, scroll_y })
     }
     case 'type':
     case 'input':
@@ -288,6 +368,16 @@ export function parseActionInput(action: unknown, mode: ToolSchemaMode): Compute
   }
   const looseResult = actionSchema.safeParse(action)
   if (looseResult.success) {
+    if (typeof action === 'object' && action !== null) {
+      const raw = action as Record<string, unknown>
+      if (
+        typeof raw.type === 'string' &&
+        raw.type.trim().toLowerCase() === 'scroll' &&
+        typeof raw.direction === 'string'
+      ) {
+        return normalizeLooseAction(raw)
+      }
+    }
     return looseResult.data
   }
   return parseLooseAction(action)
