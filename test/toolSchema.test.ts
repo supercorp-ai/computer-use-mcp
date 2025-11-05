@@ -35,6 +35,22 @@ test('loose mode understands left_click alias', () => {
   assert.equal(action.button, 'left')
 })
 
+test('loose mode understands single_click synonym', () => {
+  const action = parseActionInput({ type: 'single_click', x: 3, y: 4 }, 'loose')
+  if (action.type !== 'click') {
+    throw new Error('expected click action')
+  }
+  assert.equal(action.button, 'left')
+})
+
+test('loose mode understands tap shorthand', () => {
+  const action = parseActionInput({ type: 'tap', x: 8, y: 9 }, 'loose')
+  if (action.type !== 'click') {
+    throw new Error('expected click action')
+  }
+  assert.equal(action.button, 'left')
+})
+
 test('loose mode preserves explicit button on left_click alias', () => {
   const action = parseActionInput({ type: 'left_click', button: 'right', x: 9, y: 4 }, 'loose')
   if (action.type !== 'click') {
@@ -65,6 +81,32 @@ test('loose mode resolves right_click alias with default button', () => {
     throw new Error('expected click action')
   }
   assert.equal(action.button, 'right')
+})
+
+test('loose mode maps triple_click to double_click', () => {
+  const action = parseActionInput({ type: 'triple_click', coordinate: [199, 63] }, 'loose')
+  if (action.type !== 'double_click') {
+    throw new Error('expected double_click action')
+  }
+  assert.equal(action.x, 199)
+  assert.equal(action.y, 63)
+})
+
+test('loose mode interprets double_tap as double_click', () => {
+  const action = parseActionInput({ type: 'double_tap', coordinate: [12, 34] }, 'loose')
+  if (action.type !== 'double_click') {
+    throw new Error('expected double_click action')
+  }
+  assert.equal(action.x, 12)
+  assert.equal(action.y, 34)
+})
+
+test('loose mode falls back for unknown *_click patterns', () => {
+  const action = parseActionInput({ type: 'quadruple_click', coordinate: [5, 6] }, 'loose')
+  if (action.type !== 'click') {
+    throw new Error('expected click action')
+  }
+  assert.equal(action.button, 'left')
 })
 
 test('loose mode requires drag path entries and normalizes tuples', () => {
@@ -158,6 +200,14 @@ test('loose mode splits space-delimited key text', () => {
   assert.deepEqual(action.keys, ['Down', 'Down', 'Down', 'Down', 'Down'])
 })
 
+test('loose mode splits plus-delimited key text preserving casing', () => {
+  const action = parseActionInput({ type: 'key', text: 'alt+Left' }, 'loose')
+  if (action.type !== 'keypress') {
+    throw new Error('expected keypress action')
+  }
+  assert.deepEqual(action.keys, ['alt', 'Left'])
+})
+
 test('loose mode accepts single return key text', () => {
   const action = parseActionInput({ type: 'key', text: 'Return' }, 'loose')
   if (action.type !== 'keypress') {
@@ -195,8 +245,49 @@ test('loose mode derives scroll direction when deltas missing', () => {
   assert.equal(action.scroll_y, 120)
 })
 
+test('loose mode applies scroll_direction and amount hints', () => {
+  const action = parseActionInput(
+    {
+      type: 'scroll',
+      coordinate: [352, 400],
+      scroll_x: 0,
+      scroll_y: 0,
+      scroll_direction: 'down',
+      scroll_amount: 3,
+    },
+    'loose'
+  )
+  if (action.type !== 'scroll') {
+    throw new Error('expected scroll action')
+  }
+  assert.equal(action.x, 352)
+  assert.equal(action.y, 400)
+  assert.equal(action.scroll_x, 0)
+  assert.equal(action.scroll_y, 360)
+})
+
+test('loose mode applies horizontal scroll direction hints', () => {
+  const action = parseActionInput(
+    {
+      type: 'scroll',
+      x: 0,
+      y: 0,
+      scroll_x: 0,
+      scroll_y: 0,
+      scrollDirection: 'Left',
+      scrollAmount: 2,
+    },
+    'loose'
+  )
+  if (action.type !== 'scroll') {
+    throw new Error('expected scroll action')
+  }
+  assert.equal(action.scroll_x, -240)
+  assert.equal(action.scroll_y, 0)
+})
+
 test('loose mode throws for unsupported action types', () => {
-  assert.throws(() => parseActionInput({ type: 'triple_click', x: 5, y: 10 }, 'loose'))
+  assert.throws(() => parseActionInput({ type: 'teleport', x: 5, y: 10 }, 'loose'))
 })
 
 test('loose mode throws when drag path is empty', () => {
@@ -205,6 +296,14 @@ test('loose mode throws when drag path is empty', () => {
 
 test('strict mode rejects unknown action type', () => {
   assert.throws(() => parseActionInput({ type: 'pause' }, 'strict'))
+})
+
+test('strict mode rejects click aliases', () => {
+  assert.throws(() => parseActionInput({ type: 'left_click', x: 1, y: 2 }, 'strict'))
+})
+
+test('strict mode rejects triple_click', () => {
+  assert.throws(() => parseActionInput({ type: 'triple_click', x: 2, y: 3 }, 'strict'))
 })
 
 test('loose action schema produces canonical ComputerAction instances', () => {

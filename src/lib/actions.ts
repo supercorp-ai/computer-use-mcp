@@ -80,14 +80,25 @@ const BUTTON_ALIASES: Record<string, ClickButton> = {
   forward: 'forward',
 }
 
-const CLICK_TYPE_DEFAULTS: Record<string, ClickButton> = {
-  click: 'left',
-  left_click: 'left',
-  leftclick: 'left',
-  right_click: 'right',
-  rightclick: 'right',
-  middle_click: 'wheel',
-  middleclick: 'wheel',
+type ClickKind = 'click' | 'double_click'
+
+const CLICK_TYPE_SYNONYMS: Record<string, { kind: ClickKind; button?: ClickButton }> = {
+  click: { kind: 'click' },
+  single_click: { kind: 'click' },
+  singleclick: { kind: 'click' },
+  tap: { kind: 'click' },
+  press: { kind: 'click' },
+  left_click: { kind: 'click', button: 'left' },
+  leftclick: { kind: 'click', button: 'left' },
+  right_click: { kind: 'click', button: 'right' },
+  rightclick: { kind: 'click', button: 'right' },
+  middle_click: { kind: 'click', button: 'wheel' },
+  middleclick: { kind: 'click', button: 'wheel' },
+  triple_click: { kind: 'double_click' },
+  tripleclick: { kind: 'double_click' },
+  double_click: { kind: 'double_click' },
+  doubleclick: { kind: 'double_click' },
+  double_tap: { kind: 'double_click' },
 }
 
 const KEYS_SPLIT_REGEX = /[+\s]+/
@@ -117,6 +128,27 @@ function coerceButton(value: unknown): ClickButton | undefined {
     return undefined
   }
   return BUTTON_ALIASES[normalized]
+}
+
+function interpretClickType(type: string): { kind: ClickKind; button?: ClickButton } | undefined {
+  const mapped = CLICK_TYPE_SYNONYMS[type]
+  if (mapped) return mapped
+
+  if (type.endsWith('_click')) {
+    const prefix = type.slice(0, -6)
+    const button = coerceButton(prefix)
+    if (button) return { kind: 'click', button }
+    return { kind: 'click' }
+  }
+
+  if (type.endsWith('click')) {
+    const prefix = type.slice(0, -5)
+    const button = coerceButton(prefix)
+    if (button) return { kind: 'click', button }
+    return { kind: 'click' }
+  }
+
+  return undefined
 }
 
 function coerceKeys(value: unknown): string[] | undefined {
@@ -209,37 +241,24 @@ function normalizeLooseAction(input: Record<string, unknown>): ComputerAction {
   }
   const type = typeRaw.toLowerCase()
 
-  switch (type) {
-    case 'click':
-    case 'left_click':
-    case 'leftclick':
-    case 'right_click':
-    case 'rightclick':
-    case 'middle_click':
-    case 'middleclick': {
-      const coordinateSource =
-        input.coordinate ??
-        input.coordinates ??
-        input.position ??
-        input.pos ??
-        input.point
-      const { x, y } = resolveCoordinates(input, coordinateSource, { requireBoth: true })
-      const providedButton = coerceButton(input.button ?? input.Button)
-      const defaultButton = CLICK_TYPE_DEFAULTS[type] ?? 'left'
-      const button = providedButton ?? defaultButton
-      return actionSchema.parse({ type: 'click', x, y, button })
-    }
-    case 'double_click':
-    case 'doubleclick': {
-      const coordinateSource =
-        input.coordinate ??
-        input.coordinates ??
-        input.position ??
-        input.pos ??
-        input.point
-      const { x, y } = resolveCoordinates(input, coordinateSource, { requireBoth: true })
+  const clickMeta = interpretClickType(type)
+  if (clickMeta) {
+    const coordinateSource =
+      input.coordinate ??
+      input.coordinates ??
+      input.position ??
+      input.pos ??
+      input.point
+    const { x, y } = resolveCoordinates(input, coordinateSource, { requireBoth: true })
+    const providedButton = coerceButton(input.button ?? input.Button)
+    const button = providedButton ?? clickMeta.button ?? 'left'
+    if (clickMeta.kind === 'double_click') {
       return actionSchema.parse({ type: 'double_click', x, y })
     }
+    return actionSchema.parse({ type: 'click', x, y, button })
+  }
+
+  switch (type) {
     case 'drag': {
       const rawPath = Array.isArray(input.path)
         ? input.path
@@ -302,24 +321,54 @@ function normalizeLooseAction(input: Record<string, unknown>): ComputerAction {
       let scroll_y =
         scrollYRaw !== undefined ? coerceNumber(scrollYRaw, 'scroll_y') : 0
 
+      const directionInput =
+        input.direction ??
+        input.scroll_direction ??
+        input.scrollDirection ??
+        input.scroll_dir ??
+        input.scrollDir
       const direction =
-        typeof input.direction === 'string' ? input.direction.trim().toLowerCase() : undefined
+        typeof directionInput === 'string' ? directionInput.trim().toLowerCase() : undefined
+
+      const scrollAmountRaw =
+        input.scroll_amount ??
+        input.scrollAmount ??
+        input.amount ??
+        input.scroll_steps ??
+        input.scrollSteps ??
+        input.scroll_count ??
+        input.scrollCount
+
+      let scrollAmount = 1
+      if (scrollAmountRaw !== undefined) {
+        const numericAmount = coerceNumber(scrollAmountRaw, 'scroll_amount')
+        if (numericAmount === 0) {
+          scrollAmount = 0
+        } else if (Number.isFinite(numericAmount)) {
+          scrollAmount = Math.max(1, Math.round(Math.abs(numericAmount)))
+        }
+      }
+
       if (direction && scroll_x === 0 && scroll_y === 0) {
+        const baseMagnitude = 120 * scrollAmount
         switch (direction) {
           case 'up':
-            scroll_y = -120
+          case 'upwards':
+            scroll_y = -baseMagnitude
             break
           case 'down':
-            scroll_y = 120
+          case 'downwards':
+            scroll_y = baseMagnitude
             break
           case 'left':
-            scroll_x = -120
+            scroll_x = -baseMagnitude
             break
           case 'right':
-            scroll_x = 120
+            scroll_x = baseMagnitude
             break
         }
       }
+
       return actionSchema.parse({ type: 'scroll', x, y, scroll_x, scroll_y })
     }
     case 'type':
@@ -370,12 +419,24 @@ export function parseActionInput(action: unknown, mode: ToolSchemaMode): Compute
   if (looseResult.success) {
     if (typeof action === 'object' && action !== null) {
       const raw = action as Record<string, unknown>
-      if (
-        typeof raw.type === 'string' &&
-        raw.type.trim().toLowerCase() === 'scroll' &&
-        typeof raw.direction === 'string'
-      ) {
-        return normalizeLooseAction(raw)
+      if (typeof raw.type === 'string' && raw.type.trim().toLowerCase() === 'scroll') {
+        const hasDirection =
+          typeof raw.direction === 'string' ||
+          typeof raw.scroll_direction === 'string' ||
+          typeof raw.scrollDirection === 'string' ||
+          typeof raw.scroll_dir === 'string' ||
+          typeof raw.scrollDir === 'string'
+        const hasAmount =
+          raw.scroll_amount !== undefined ||
+          raw.scrollAmount !== undefined ||
+          raw.amount !== undefined ||
+          raw.scroll_steps !== undefined ||
+          raw.scrollSteps !== undefined ||
+          raw.scroll_count !== undefined ||
+          raw.scrollCount !== undefined
+        if (hasDirection || hasAmount) {
+          return normalizeLooseAction(raw)
+        }
       }
     }
     return looseResult.data
