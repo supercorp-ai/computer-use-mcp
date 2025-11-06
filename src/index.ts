@@ -283,32 +283,6 @@ class ComputerSession {
   private hlsRecorder?: HlsRecorder
   private readonly display: VirtualDisplay
   private rtsp?: RtspPublisher
-  private readonly instrumentedPages = new WeakSet<BrowserPage>()
-  private readonly instrumentedPlaywrightContexts = new WeakSet<PlaywrightBrowserContext>()
-  private readonly onPlaywrightPage = (page: PlaywrightPage) => {
-    this.attachPageEventListeners(page)
-  }
-  private readonly onPuppeteerTarget = async (target: unknown) => {
-    if (!target || typeof (target as { type?: () => string }).type !== 'function') {
-      return
-    }
-    let targetType: string | undefined
-    try {
-      targetType = (target as { type: () => string }).type()
-    } catch {
-      return
-    }
-    if (targetType !== 'page') return
-    try {
-      const pageFn = (target as { page?: () => Promise<unknown> }).page
-      if (typeof pageFn !== 'function') return
-      const newPage = await pageFn.call(target)
-      if (!newPage) return
-      this.attachPageEventListeners(newPage as BrowserPage)
-    } catch (err) {
-      console.warn(`[computer-mcp] (${this.memoryKey}) failed to attach console listeners for new page:`, err)
-    }
-  }
 
   constructor(private readonly memoryKey: string, private readonly config: Config, displayNumber: number) {
     this.display = new VirtualDisplay(displayNumber, config.displayWidth, config.displayHeight, config.xvfbPath)
@@ -780,91 +754,6 @@ class ComputerSession {
     return next
   }
 
-  private attachPlaywrightContextListeners(context: PlaywrightBrowserContext) {
-    if (this.instrumentedPlaywrightContexts.has(context)) {
-      return
-    }
-    this.instrumentedPlaywrightContexts.add(context)
-    context.on('page', this.onPlaywrightPage)
-    for (const page of context.pages()) {
-      this.attachPageEventListeners(page)
-    }
-  }
-
-  private attachPageEventListeners(page: BrowserPage) {
-    if (this.instrumentedPages.has(page)) {
-      return
-    }
-    this.instrumentedPages.add(page)
-
-    if (this.config.automationDriver === 'playwright') {
-      const playwrightPage = page as PlaywrightPage
-      playwrightPage.on('console', message => {
-        try {
-          this.logBrowserConsoleMessage(message.type(), message.text())
-        } catch (err) {
-          console.warn(`[computer-mcp] (${this.memoryKey}) failed to log Playwright console message:`, err)
-        }
-      })
-      playwrightPage.on('pageerror', error => {
-        console.error(`[computer-mcp] (${this.memoryKey}) [browser] pageerror:`, error)
-      })
-      playwrightPage.on('requestfailed', request => {
-        const failure = request.failure()
-        console.warn(
-          `[computer-mcp] (${this.memoryKey}) [browser] requestfailed ${request.url()} (${request.method()}): ${failure?.errorText ?? 'unknown error'}`
-        )
-      })
-      return
-    }
-
-    const puppeteerPage = page as PuppeteerPage
-    puppeteerPage.on('console', message => {
-      try {
-        this.logBrowserConsoleMessage(message.type(), message.text())
-      } catch (err) {
-        console.warn(`[computer-mcp] (${this.memoryKey}) failed to log Puppeteer console message:`, err)
-      }
-    })
-    puppeteerPage.on('pageerror', error => {
-      console.error(`[computer-mcp] (${this.memoryKey}) [browser] pageerror:`, error)
-    })
-    puppeteerPage.on('requestfailed', request => {
-      const failure = typeof request.failure === 'function' ? request.failure() : undefined
-      const method = typeof request.method === 'function' ? request.method() : 'UNKNOWN'
-      const url = typeof request.url === 'function' ? request.url() : 'unknown'
-      console.warn(
-        `[computer-mcp] (${this.memoryKey}) [browser] requestfailed ${url} (${method}): ${failure?.errorText ?? 'unknown error'}`
-      )
-    })
-  }
-
-  private logBrowserConsoleMessage(type: string | undefined, rawText: string | undefined) {
-    const normalizedType = type || 'log'
-    const prefix = `[computer-mcp] (${this.memoryKey}) [browser console.${normalizedType}]`
-    const message = rawText ?? ''
-    const output = message ? `${prefix} ${message}` : `${prefix} (no message)`
-    switch (normalizedType) {
-      case 'error':
-        console.error(output)
-        break
-      case 'warning':
-      case 'warn':
-        console.warn(output)
-        break
-      case 'debug':
-      case 'trace':
-        console.debug(output)
-        break
-      case 'info':
-        console.info(output)
-        break
-      default:
-        console.log(output)
-        break
-    }
-  }
-
   private async loadPlaywrightModule(): Promise<PlaywrightModule> {
     if (this.config.automationDriver !== 'playwright') {
       throw new Error('Playwright module requested but automationDriver is not "playwright".')
@@ -1038,7 +927,6 @@ class ComputerSession {
         this.playwrightContext = context
         this.browser = browser ?? (context as unknown as BrowserBackend)
         this.page = page
-        this.attachPlaywrightContextListeners(context)
         if (!this.playwrightLaunchLogged) {
           const moduleName = this.config.stealth ? 'patchright' : 'playwright'
           let executable: string | undefined
@@ -1081,7 +969,6 @@ class ComputerSession {
       this.browser = browser ?? (context as unknown as BrowserBackend)
       this.playwrightContext = context
       this.page = page
-      this.attachPlaywrightContextListeners(context)
       if (!this.playwrightLaunchLogged) {
         const moduleName = this.config.stealth ? 'patchright' : 'playwright'
         let executable: string | undefined
@@ -1118,11 +1005,6 @@ class ComputerSession {
     const pages = await browser.pages()
     const page = pages.length ? pages[0] : await browser.newPage()
     this.page = page
-    for (const existing of pages) {
-      this.attachPageEventListeners(existing)
-    }
-    this.attachPageEventListeners(page)
-    browser.on('targetcreated', this.onPuppeteerTarget)
     try {
       await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 })
     } catch (err) {
