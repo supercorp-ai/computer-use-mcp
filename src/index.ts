@@ -248,6 +248,8 @@ function humanActionSummary(action: ComputerAction): string {
       return `click ${action.button} at (${action.x}, ${action.y})`
     case 'double_click':
       return `double_click left at (${action.x}, ${action.y})`
+    case 'triple_click':
+      return `triple_click left at (${action.x}, ${action.y})`
     case 'drag':
       return `drag through ${action.path.length} points`
     case 'keypress':
@@ -1024,6 +1026,10 @@ class ComputerSession {
       case 'double_click':
         await this.moveSystemPointer(action.x, action.y)
         await this.runXdotool(['click', '--repeat', '2', '--delay', '120', '1'])
+        return
+      case 'triple_click':
+        await this.moveSystemPointer(action.x, action.y)
+        await this.runXdotool(['click', '--repeat', '3', '--delay', '120', '1'])
         return
       case 'drag': {
         const [start, ...rest] = action.path

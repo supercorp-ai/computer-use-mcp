@@ -83,13 +83,31 @@ test('loose mode resolves right_click alias with default button', () => {
   assert.equal(action.button, 'right')
 })
 
-test('loose mode maps triple_click to double_click', () => {
+test('strict mode accepts triple_click action', () => {
+  const action = parseActionInput({ type: 'triple_click', x: 5, y: 6 }, 'strict')
+  if (action.type !== 'triple_click') {
+    throw new Error('expected triple_click action')
+  }
+  assert.equal(action.x, 5)
+  assert.equal(action.y, 6)
+})
+
+test('loose mode maps triple_click to triple_click action', () => {
   const action = parseActionInput({ type: 'triple_click', coordinate: [199, 63] }, 'loose')
-  if (action.type !== 'double_click') {
-    throw new Error('expected double_click action')
+  if (action.type !== 'triple_click') {
+    throw new Error('expected triple_click action')
   }
   assert.equal(action.x, 199)
   assert.equal(action.y, 63)
+})
+
+test('loose mode maps triple_tap to triple_click action', () => {
+  const action = parseActionInput({ type: 'triple_tap', coordinate: [33, 44] }, 'loose')
+  if (action.type !== 'triple_click') {
+    throw new Error('expected triple_click action')
+  }
+  assert.equal(action.x, 33)
+  assert.equal(action.y, 44)
 })
 
 test('loose mode interprets double_tap as double_click', () => {
@@ -339,8 +357,8 @@ test('strict mode rejects direction-only scroll hint', () => {
   assert.throws(() => parseActionInput({ type: 'scroll', scroll_direction: 'down' }, 'strict'))
 })
 
-test('strict mode rejects triple_click', () => {
-  assert.throws(() => parseActionInput({ type: 'triple_click', x: 2, y: 3 }, 'strict'))
+test('strict mode rejects triple_tap alias', () => {
+  assert.throws(() => parseActionInput({ type: 'triple_tap', x: 2, y: 3 }, 'strict'))
 })
 
 test('loose action schema produces canonical ComputerAction instances', () => {

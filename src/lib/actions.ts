@@ -13,6 +13,12 @@ const doubleClickActionSchema = z.object({
   y: z.number(),
 })
 
+const tripleClickActionSchema = z.object({
+  type: z.literal('triple_click'),
+  x: z.number(),
+  y: z.number(),
+})
+
 const dragActionSchema = z.object({
   type: z.literal('drag'),
   path: z.array(z.object({ x: z.number(), y: z.number() })).min(1),
@@ -53,6 +59,7 @@ const waitActionSchema = z.object({
 export const actionSchema = z.discriminatedUnion('type', [
   clickActionSchema,
   doubleClickActionSchema,
+  tripleClickActionSchema,
   dragActionSchema,
   keyPressActionSchema,
   moveActionSchema,
@@ -80,7 +87,7 @@ const BUTTON_ALIASES: Record<string, ClickButton> = {
   forward: 'forward',
 }
 
-type ClickKind = 'click' | 'double_click'
+type ClickKind = 'click' | 'double_click' | 'triple_click'
 
 const CLICK_TYPE_SYNONYMS: Record<string, { kind: ClickKind; button?: ClickButton }> = {
   click: { kind: 'click' },
@@ -94,8 +101,9 @@ const CLICK_TYPE_SYNONYMS: Record<string, { kind: ClickKind; button?: ClickButto
   rightclick: { kind: 'click', button: 'right' },
   middle_click: { kind: 'click', button: 'wheel' },
   middleclick: { kind: 'click', button: 'wheel' },
-  triple_click: { kind: 'double_click' },
-  tripleclick: { kind: 'double_click' },
+  triple_click: { kind: 'triple_click' },
+  tripleclick: { kind: 'triple_click' },
+  triple_tap: { kind: 'triple_click' },
   double_click: { kind: 'double_click' },
   doubleclick: { kind: 'double_click' },
   double_tap: { kind: 'double_click' },
@@ -252,6 +260,9 @@ function normalizeLooseAction(input: Record<string, unknown>): ComputerAction {
     const { x, y } = resolveCoordinates(input, coordinateSource, { requireBoth: true })
     const providedButton = coerceButton(input.button ?? input.Button)
     const button = providedButton ?? clickMeta.button ?? 'left'
+    if (clickMeta.kind === 'triple_click') {
+      return actionSchema.parse({ type: 'triple_click', x, y })
+    }
     if (clickMeta.kind === 'double_click') {
       return actionSchema.parse({ type: 'double_click', x, y })
     }
