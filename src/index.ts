@@ -33,6 +33,12 @@ type BrowserBackend = PuppeteerBrowser | PlaywrightBrowser
 type BrowserPage = PuppeteerPage | PlaywrightPage
 type PlaywrightModule = typeof import('playwright')
 
+interface ProxySettings {
+  server: string
+  username?: string
+  password?: string
+}
+
 interface Config {
   port: number
   transport: 'sse' | 'stdio' | 'http'
@@ -66,6 +72,7 @@ interface Config {
   imageOutputFormat: ImageOutputFormat
   postActionDelayMs: number
   actionScreenshotMode: 'auto' | 'manual'
+  proxy?: ProxySettings
 }
 
 interface ActionResult {
@@ -208,6 +215,44 @@ const XDOToolKeyAliases: Record<string, string> = {
   down: 'Down',
   left: 'Left',
   right: 'Right',
+}
+
+const SUPPORTED_PROXY_PROTOCOLS = ['http:', 'https:', 'socks4:', 'socks4a:', 'socks5:', 'socks5h:'] as const
+
+function parseProxySettings(value: string): ProxySettings {
+  let parsed: URL
+  try {
+    parsed = new URL(value)
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err)
+    throw new Error(`Invalid proxy URL "${value}": ${reason}`)
+  }
+
+  if (!SUPPORTED_PROXY_PROTOCOLS.includes(parsed.protocol as typeof SUPPORTED_PROXY_PROTOCOLS[number])) {
+    throw new Error(
+      `Unsupported proxy protocol "${parsed.protocol}". Expected one of: ${SUPPORTED_PROXY_PROTOCOLS.map(p => p.replace(/:$/, '')).join(', ')}.`
+    )
+  }
+  if (!parsed.hostname || !parsed.port) {
+    throw new Error('Proxy URL must include a hostname and port, e.g. http://user:pass@example:15001')
+  }
+
+  const decode = (input: string): string => {
+    try {
+      return decodeURIComponent(input)
+    } catch {
+      throw new Error('Proxy credentials must use valid percent-encoding (RFC 3986).')
+    }
+  }
+
+  const username = parsed.username ? decode(parsed.username) : undefined
+  const password = parsed.password ? decode(parsed.password) : undefined
+
+  return {
+    server: `${parsed.protocol}//${parsed.host}`,
+    username,
+    password,
+  }
 }
 
 function normalizeXdotoolKey(rawKey: string): string | null {
@@ -888,6 +933,10 @@ class ComputerSession {
       )
     }
 
+    if (this.config.proxy) {
+      args.push(`--proxy-server=${this.config.proxy.server}`)
+    }
+
     // Add disk cache dir for better container support
     if (process.env.FLY_APP_NAME) {
       args.push('--disk-cache-dir=/tmp/chrome-cache')
@@ -906,6 +955,13 @@ class ComputerSession {
     if (this.config.automationDriver === 'playwright') {
       const playwright = await this.loadPlaywrightModule()
       const chromiumSandbox = typeof process.getuid === 'function' && process.getuid() === 0 ? false : undefined
+      const proxyForPlaywright = this.config.proxy
+        ? {
+            server: this.config.proxy.server,
+            username: this.config.proxy.username,
+            password: this.config.proxy.password,
+          }
+        : undefined
 
       if (this.config.stealth) {
         // Stealth mode requires persistent context - DuckDuckGo set via Chrome policies (see Dockerfile)
@@ -918,6 +974,7 @@ class ComputerSession {
           chromiumSandbox,
           env,
           args,
+          proxy: proxyForPlaywright,
           ignoreDefaultArgs: ['--enable-automation'],
           timeout: 120000, // 120s timeout for testing Xvfb readiness
         })
@@ -960,6 +1017,7 @@ class ComputerSession {
         chromiumSandbox,
         env,
         args,
+        proxy: proxyForPlaywright,
         ignoreDefaultArgs: ['--enable-automation'],
         timeout: 120000, // 120s timeout for testing Xvfb readiness
       })
@@ -1007,6 +1065,18 @@ class ComputerSession {
     const pages = await browser.pages()
     const page = pages.length ? pages[0] : await browser.newPage()
     this.page = page
+
+    if (this.config.proxy && (this.config.proxy.username || this.config.proxy.password)) {
+      try {
+        await page.authenticate({
+          username: this.config.proxy.username ?? '',
+          password: this.config.proxy.password ?? '',
+        })
+      } catch (err) {
+        console.warn(`[computer-mcp] (${this.memoryKey}) failed to apply proxy credentials:`, err)
+      }
+    }
+
     try {
       await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 })
     } catch (err) {
@@ -1646,6 +1716,10 @@ async function main() {
     .option('environment', { type: 'string', default: 'browser' })
     .option('headless', { type: 'boolean', default: false })
     .option('defaultUrl', { type: 'string' })
+    .option('proxy', {
+      type: 'string',
+      describe: 'HTTP/SOCKS proxy URL applied to browser sessions (e.g. http://user:pass@host:15001).',
+    })
     .option('toolsPrefix', { type: 'string', default: 'computer_' })
     .option('toolSchema', {
       type: 'string',
@@ -1710,6 +1784,17 @@ async function main() {
   const streamModes = new Set(streamModeInputs)
   const streamAutoEnabled = streamModes.has('auto')
   const streamFunctionsEnabled = streamModes.has('functions')
+
+  let proxySettings: ProxySettings | undefined
+  if (typeof argv.proxy === 'string' && argv.proxy.trim()) {
+    try {
+      proxySettings = parseProxySettings(argv.proxy.trim())
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      console.error(`[computer-mcp] ${message}`)
+      process.exit(1)
+    }
+  }
   const streamEnabled = streamAutoEnabled || streamFunctionsEnabled
 
   if (argv.previewPath && !streamEnabled) {
@@ -1812,6 +1897,7 @@ async function main() {
     imageOutputFormat: (argv.imageOutputFormat as ImageOutputFormat) ?? 'mcp-spec',
     postActionDelayMs,
     actionScreenshotMode,
+    proxy: proxySettings,
   }
 
   console.log('[computer-mcp] startup config', {
@@ -1833,6 +1919,7 @@ async function main() {
     chromePath: config.chromePath,
     ffmpegPath: config.ffmpegPath,
     xvfbPath: config.xvfbPath,
+    proxyServer: config.proxy?.server,
   })
 
   const baseUrl = resolveBaseUrl(config)

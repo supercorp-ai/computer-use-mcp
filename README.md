@@ -11,6 +11,7 @@ An MCP server that exposes a virtual browser session driven through computer-use
 - Optional HLS streaming with a shared browser window; pass `--stream auto` to launch it automatically and `--stream functions` to expose `start_stream`, `get_stream`, and `stop_stream` MCP tools.
 - Works over stdio, SSE, or streamable HTTP transports.
 - Configurable viewport size, default URL, and multiple transport modes.
+- Supports routing browser traffic through HTTP/SOCKS proxies (including credentials) via `--proxy`.
 - Optional preview page (set `--previewPath`) that displays the shared HLS feed.
 - Serves a local `/blank` page that guarantees capture-friendly content before the agent navigates elsewhere.
 - Powered by Xvfb + ffmpeg so the stream shows the full Chrome window (address bar, tabs, etc.).
@@ -102,6 +103,7 @@ Options:
   --environment <string>    Only "browser" is currently supported (default: "browser")
   --headless                Ignored for streaming; Chrome always runs headful so the video shows UI
   --defaultUrl <string>     Optional URL to load when a session starts
+  --proxy <url>             Route browser traffic through an HTTP/SOCKS proxy (e.g. http://user:pass@host:15001)
   --toolsPrefix <string>    Prefix added to registered tool names (default: "computer_")
   --publicBaseUrl <url>     Base URL used when constructing screenshot and stream links (default: http://localhost:<port>)
   --streamFps <number>      Default MJPEG stream FPS (1–30, default: 2)

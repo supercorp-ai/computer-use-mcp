@@ -3,3 +3,4 @@ dist-test
 node_modules
 cloudflared-config.yml
 .claude
+fly.toml
