@@ -1716,6 +1716,10 @@ async function main() {
     .option('environment', { type: 'string', default: 'browser' })
     .option('headless', { type: 'boolean', default: false })
     .option('defaultUrl', { type: 'string' })
+    .option('blankPageUrl', {
+      type: 'string',
+      describe: 'URL to load when no defaultUrl is provided (default: https://superhero.sh/chat).',
+    })
     .option('proxy', {
       type: 'string',
       describe: 'HTTP/SOCKS proxy URL applied to browser sessions (e.g. http://user:pass@host:15001).',
@@ -1803,9 +1807,11 @@ async function main() {
   }
 
   const streamPath = normalizeRoutePath(argv.streamPath, '/streams')
-  // const internalOrigin = `http://127.0.0.1:${argv.port}`
-  const blankPageUrl = 'https://superhero.sh/chat'
-          // `${internalOrigin}/blank`
+  const defaultBlankPageUrl = 'https://superhero.sh/chat'
+  const blankPageUrl =
+    typeof argv.blankPageUrl === 'string' && argv.blankPageUrl.trim()
+      ? argv.blankPageUrl.trim()
+      : defaultBlankPageUrl
   const automationDriver: Config['automationDriver'] =
     typeof argv.automationDriver === 'string' && argv.automationDriver.toLowerCase() === 'playwright'
       ? 'playwright'
@@ -1919,6 +1925,7 @@ async function main() {
     chromePath: config.chromePath,
     ffmpegPath: config.ffmpegPath,
     xvfbPath: config.xvfbPath,
+    blankPageUrl: config.blankPageUrl,
     proxyServer: config.proxy?.server,
   })
 

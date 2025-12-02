@@ -103,6 +103,7 @@ Options:
   --environment <string>    Only "browser" is currently supported (default: "browser")
   --headless                Ignored for streaming; Chrome always runs headful so the video shows UI
   --defaultUrl <string>     Optional URL to load when a session starts
+  --blankPageUrl <string>   URL to load when no defaultUrl is provided (default: https://superhero.sh/chat)
   --proxy <url>             Route browser traffic through an HTTP/SOCKS proxy (e.g. http://user:pass@host:15001)
   --toolsPrefix <string>    Prefix added to registered tool names (default: "computer_")
   --publicBaseUrl <url>     Base URL used when constructing screenshot and stream links (default: http://localhost:<port>)
