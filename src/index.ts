@@ -28,7 +28,7 @@ import { actionSchema, ComputerAction, looseActionInputSchema, ToolSchemaMode } 
 // Configuration Types
 // -----------------------------------------------------------------------------
 type ImageOutputFormat = 'mcp-spec' | 'openai-responses-api'
-type StreamTarget = 'local' | 'mediamtx'
+type StreamTarget = 'local' | 'mediamtx' | 'ome'
 type BrowserBackend = PuppeteerBrowser | PlaywrightBrowser
 type BrowserPage = PuppeteerPage | PlaywrightPage
 type PlaywrightModule = typeof import('playwright')
@@ -56,11 +56,15 @@ interface Config {
   streamDefaults: { fps: number; quality: number }
   streamEnabled: boolean
   streamFunctions: boolean
-  streamTarget: StreamTarget;               // 'local' | 'mediamtx'
+  streamTarget: StreamTarget;               // 'local' | 'mediamtx' | 'ome'
   mtxRtspUrl?: string;                      // e.g. rtsp://mediamtx:8554/computer_use
   mtxHlsUrl?: string;                       // optional override play URL (https://.../index.m3u8)
   mtxFps: number;                           // e.g. 25
   mtxBitrateK: number;                      // e.g. 2500
+  omeRtmpUrl?: string;                      // e.g. rtmp://ome:1935/app/stream (OME ingest)
+  omeHlsUrl?: string;                       // e.g. http://ome:8080/streams/.../llhls.m3u8
+  omeFps: number;                           // default mirrors mtxFps
+  omeBitrateK: number;                      // default mirrors mtxBitrateK
   audioSource: 'none' | 'anullsrc' | 'pulse'; // how to provide audio
   previewPath?: string
   chromePath?: string
@@ -89,6 +93,15 @@ type HlsRecorder = {
 type RtspPublisher = {
   process: ChildProcess
   rtspUrl: string
+  opts: { fps: number; bitrateK: number; audioSource: 'none'|'anullsrc'|'pulse' }
+  heartbeatInterval?: NodeJS.Timeout
+  restartCount: number
+  lastRestartTime: number
+}
+
+type RtmpPublisher = {
+  process: ChildProcess
+  rtmpUrl: string
   opts: { fps: number; bitrateK: number; audioSource: 'none'|'anullsrc'|'pulse' }
   heartbeatInterval?: NodeJS.Timeout
   restartCount: number
@@ -330,6 +343,7 @@ class ComputerSession {
   private hlsRecorder?: HlsRecorder
   private readonly display: VirtualDisplay
   private rtsp?: RtspPublisher
+  private rtmp?: RtmpPublisher
 
   constructor(private readonly memoryKey: string, private readonly config: Config, displayNumber: number) {
     this.display = new VirtualDisplay(displayNumber, config.displayWidth, config.displayHeight, config.xvfbPath)
@@ -361,6 +375,7 @@ class ComputerSession {
     await this.enqueue(async () => {
       await this.stopHlsRecorder()
       await this.stopRtspPublisher()
+      await this.stopRtmpPublisher()
       if (this.config.automationDriver === 'playwright') {
         try {
           await this.playwrightContext?.close()
@@ -653,6 +668,124 @@ class ComputerSession {
     try { pub.process.kill('SIGTERM') } catch {}
     try { await once(pub.process, 'exit') } catch {}
     console.log(`[computer-mcp] (${this.memoryKey}) ffmpeg rtsp publisher stopped`)
+  }
+
+  async ensureRtmpPublisher(
+    rtmpUrl: string,
+    opts: { fps: number; bitrateK: number; audioSource: 'none' | 'anullsrc' | 'pulse' }
+  ) {
+    await this.ensureEnvironment()
+    if (
+      this.rtmp &&
+      this.rtmp.rtmpUrl === rtmpUrl &&
+      this.rtmp.opts.fps === opts.fps &&
+      this.rtmp.opts.bitrateK === opts.bitrateK &&
+      this.rtmp.opts.audioSource === opts.audioSource
+    ) {
+      return
+    }
+    await this.stopRtmpPublisher().catch(() => {})
+
+    const inputTarget = `${this.display.displayEnv}+0,0`
+
+    const vIn = [
+      '-f', 'x11grab',
+      '-video_size', `${this.config.displayWidth}x${this.config.displayHeight}`,
+      '-draw_mouse', '1',
+      '-i', inputTarget,
+    ]
+
+    const aIn =
+      opts.audioSource === 'pulse'    ? ['-f','pulse','-i','default'] :
+      opts.audioSource === 'anullsrc' ? ['-f','lavfi','-i','anullsrc=r=48000:cl=stereo'] :
+      []
+
+    const ffArgs = [
+      '-loglevel','error','-nostdin',
+      ...vIn, ...aIn,
+      '-c:v','libx264','-preset','veryfast','-tune','zerolatency',
+      '-profile:v','baseline','-level','3.1','-pix_fmt','yuv420p',
+      '-r', String(opts.fps),
+      '-g', String(opts.fps), '-keyint_min', String(opts.fps), '-sc_threshold','0',
+      '-b:v', `${opts.bitrateK}k`,
+      '-maxrate', `${Math.round(opts.bitrateK*1.2)}k`,
+      '-bufsize', `${Math.round(opts.bitrateK*0.6)}k`,
+      ...(aIn.length ? ['-c:a','aac','-b:a','128k','-ar','48000','-ac','2'] : []),
+      '-fflags','+genpts',
+      '-f','flv', rtmpUrl,
+    ]
+
+    const env = { ...process.env, DISPLAY: this.display.displayEnv }
+    const proc = spawn(this.config.ffmpegPath, ffArgs, { env, stdio: ['ignore','pipe','pipe'] })
+
+    const now = Date.now()
+    const publisher: RtmpPublisher = {
+      process: proc,
+      rtmpUrl,
+      opts,
+      restartCount: 0,
+      lastRestartTime: now,
+    }
+
+    proc.stderr?.on('data', d => {
+      const t = d.toString().trim()
+      if (t) {
+        console.error(`[computer-mcp] (${this.memoryKey}) ffmpeg rtmp stderr: ${t}`)
+      }
+    })
+
+    proc.stdout?.on('data', d => {
+      const t = d.toString().trim()
+      if (t) {
+        console.log(`[computer-mcp] (${this.memoryKey}) ffmpeg rtmp stdout: ${t}`)
+      }
+    })
+
+    proc.on('exit', (code, signal) => {
+      console.error(`[computer-mcp] (${this.memoryKey}) ffmpeg rtmp exited (code=${code ?? 'n/a'}, signal=${signal ?? 'n/a'})`)
+
+      if (this.rtmp?.process === proc) {
+        clearInterval(this.rtmp.heartbeatInterval)
+        this.rtmp = undefined
+
+        const timeSinceLastRestart = Date.now() - publisher.lastRestartTime
+        const shouldRestart = publisher.restartCount < 5 || timeSinceLastRestart > 60000
+
+        if (shouldRestart) {
+          const restartDelay = Math.min(1000 * Math.pow(2, publisher.restartCount), 30000)
+          console.warn(`[computer-mcp] (${this.memoryKey}) Restarting ffmpeg rtmp in ${restartDelay}ms (attempt ${publisher.restartCount + 1})`)
+
+          setTimeout(() => {
+            this.ensureRtmpPublisher(rtmpUrl, opts).catch(err => {
+              console.error(`[computer-mcp] (${this.memoryKey}) Failed to restart ffmpeg rtmp:`, err)
+            })
+          }, restartDelay)
+        } else {
+          console.error(`[computer-mcp] (${this.memoryKey}) ffmpeg rtmp exceeded restart limit (5 attempts), giving up`)
+        }
+      }
+    })
+
+    const heartbeatInterval = setInterval(() => {
+      if (proc.exitCode === null && !proc.killed) {
+        console.log(`[computer-mcp] (${this.memoryKey}) ffmpeg rtmp heartbeat: streaming (pid=${proc.pid})`)
+      }
+    }, 30000)
+
+    publisher.heartbeatInterval = heartbeatInterval
+    this.rtmp = publisher
+
+    console.log(`[computer-mcp] (${this.memoryKey}) ffmpeg rtmp publisher started (${opts.fps}fps, ${opts.bitrateK}kbps)`)
+  }
+
+  async stopRtmpPublisher() {
+    const pub = this.rtmp
+    if (!pub) return
+    this.rtmp = undefined
+    if (pub.heartbeatInterval) clearInterval(pub.heartbeatInterval)
+    try { pub.process.kill('SIGTERM') } catch {}
+    try { await once(pub.process, 'exit') } catch {}
+    console.log(`[computer-mcp] (${this.memoryKey}) ffmpeg rtmp publisher stopped`)
   }
 
   async ensureHlsRecorder(dir: string, options: { fps: number; quality: number }): Promise<void> {
@@ -1286,15 +1419,14 @@ class StreamManager {
 
   // ---------- public API ----------
   async startStream(options?: { fps?: number; quality?: number }) {
-    return this.config.streamTarget === 'mediamtx'
-      ? this.startMediaMtxHls()
-      : this.startLocalHls(options)
+    if (this.config.streamTarget === 'mediamtx') return this.startMediaMtxHls()
+    if (this.config.streamTarget === 'ome') return this.startOmeHls()
+    return this.startLocalHls(options)
   }
 
   async getStream(options?: { fps?: number; quality?: number }) {
-    if (this.config.streamTarget === 'mediamtx') {
-      return this.startMediaMtxHls() // idempotent: re-ensures publisher, returns URL
-    }
+    if (this.config.streamTarget === 'mediamtx') return this.startMediaMtxHls()
+    if (this.config.streamTarget === 'ome') return this.startOmeHls()
     return this.startLocalHls(options)
   }
 
@@ -1303,6 +1435,11 @@ class StreamManager {
       const session = this.sessionManager.peek()
       if (session) await session.stopRtspPublisher()
       return { stopped: true, streamId: 'mediamtx' }
+    }
+    if (this.config.streamTarget === 'ome') {
+      const session = this.sessionManager.peek()
+      if (session) await session.stopRtmpPublisher()
+      return { stopped: true, streamId: 'ome' }
     }
     const stream = this.current
     if (!stream || stream.closed) return { stopped: false }
@@ -1320,6 +1457,10 @@ class StreamManager {
     if (this.config.streamTarget === 'mediamtx') {
       const url = this.resolveMediaMtxHlsUrl()
       return url ? { streamId: 'mediamtx', url } : undefined
+    }
+    if (this.config.streamTarget === 'ome') {
+      const url = this.resolveOmeHlsUrl()
+      return url ? { streamId: 'ome', url } : undefined
     }
     const stream = this.current
     if (stream && !stream.closed) return { streamId: stream.streamId, url: this.streamUrl(stream.streamId) }
@@ -1369,6 +1510,20 @@ class StreamManager {
     return { streamId: 'mediamtx', url, created: true }
   }
 
+  private async startOmeHls() {
+    if (!this.config.omeRtmpUrl) {
+      throw new Error('omeRtmpUrl is required for streamTarget=ome')
+    }
+    const session = this.sessionManager.get()
+    await session.ensureRtmpPublisher(this.config.omeRtmpUrl, {
+      fps: this.config.omeFps,
+      bitrateK: this.config.omeBitrateK,
+      audioSource: this.config.audioSource,
+    })
+    const url = this.resolveOmeHlsUrl()
+    return { streamId: 'ome', url, created: true }
+  }
+
   // ---------- helpers ----------
   private streamUrl(streamId: string): string {
     return `${this.baseUrlFactory()}${this.config.streamPath}/${streamId}/index.m3u8`
@@ -1381,6 +1536,16 @@ class StreamManager {
       .replace(/^rtsp:\/\//i, 'https://')
       .replace(':8554/', ':8888/')
       .replace(/\/$/, '') + '/index.m3u8'
+  }
+
+  private resolveOmeHlsUrl(): string {
+    if (this.config.omeHlsUrl && this.config.omeHlsUrl.trim()) return this.config.omeHlsUrl.trim()
+    if (!this.config.omeRtmpUrl) return ''
+    // fallback: rtmp://host:1935/app/stream -> http://host:8080/app/stream/llhls.m3u8
+    return this.config.omeRtmpUrl
+      .replace(/^rtmp:\/\//i, 'http://')
+      .replace(':1935/', ':8080/')
+      .replace(/\/$/, '') + '/llhls.m3u8'
   }
 }
 
@@ -1740,11 +1905,15 @@ async function main() {
       string: true,
       describe: 'Enable streaming features (e.g. --stream auto --stream functions).',
     })
-    .option('streamTarget', { type: 'string', choices: ['local', 'mediamtx'], default: 'local' })
+    .option('streamTarget', { type: 'string', choices: ['local', 'mediamtx', 'ome'], default: 'local' })
     .option('mtxRtspUrl', { type: 'string', describe: 'RTSP publish URL for MediaMTX (when --streamTarget mediamtx)' })
     .option('mtxHlsUrl', { type: 'string', describe: 'Explicit HLS playback URL for MediaMTX (optional)' })
     .option('mtxFps', { type: 'number', default: 25 })
     .option('mtxBitrateK', { type: 'number', default: 2500 })
+    .option('omeRtmpUrl', { type: 'string', describe: 'RTMP publish URL for OME (when --streamTarget ome)' })
+    .option('omeHlsUrl', { type: 'string', describe: 'Explicit HLS/LL-HLS playback URL for OME (optional)' })
+    .option('omeFps', { type: 'number', describe: 'FPS when publishing to OME (default: mtxFps)' })
+    .option('omeBitrateK', { type: 'number', describe: 'Video bitrate (kbps) when publishing to OME (default: mtxBitrateK)' })
     .option('audioSource', { type: 'string', choices: ['none','anullsrc','pulse'], default: 'anullsrc' })
     .option('previewPath', { type: 'string', describe: 'Mount an HTML preview page at the given path (requires --stream).' })
     .option('chromePath', { type: 'string', describe: 'Path to Chrome/Chromium executable launched by Puppeteer (default: bundled binary).' })
@@ -1893,6 +2062,10 @@ async function main() {
     mtxHlsUrl: argv.mtxHlsUrl,
     mtxFps: Math.max(1, Math.min(60, argv.mtxFps ?? 25)),
     mtxBitrateK: Math.max(200, Math.min(20000, argv.mtxBitrateK ?? 2500)),
+    omeRtmpUrl: argv.omeRtmpUrl,
+    omeHlsUrl: argv.omeHlsUrl,
+    omeFps: Math.max(1, Math.min(60, argv.omeFps ?? argv.mtxFps ?? 25)),
+    omeBitrateK: Math.max(200, Math.min(20000, argv.omeBitrateK ?? argv.mtxBitrateK ?? 2500)),
     audioSource: (argv.audioSource as 'none'|'anullsrc'|'pulse') ?? 'anullsrc',
     previewPath: previewRoute,
     chromePath: chromeExecutable,
@@ -1922,6 +2095,8 @@ async function main() {
     streamEnabled: config.streamEnabled,
     streamFunctions: config.streamFunctions,
     streamTarget: config.streamTarget,
+    mtxRtspUrl: config.mtxRtspUrl,
+    omeRtmpUrl: config.omeRtmpUrl,
     chromePath: config.chromePath,
     ffmpegPath: config.ffmpegPath,
     xvfbPath: config.xvfbPath,
